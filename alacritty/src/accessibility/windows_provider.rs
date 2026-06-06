@@ -5,6 +5,8 @@ use std::ptr;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use alacritty_terminal::event::EventListener;
+use alacritty_terminal::term::Term;
 use windows_sys::core::{BSTR, GUID, HRESULT};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, S_OK, VARIANT_TRUE, WPARAM};
 use windows_sys::Win32::System::Variant::{
@@ -13,12 +15,16 @@ use windows_sys::Win32::System::Variant::{
 use windows_sys::Win32::UI::Accessibility::{
     ProviderOptions, ProviderOptions_ServerSideProvider, UIA_ControlTypePropertyId,
     UIA_IsContentElementPropertyId, UIA_IsControlElementPropertyId,
-    UIA_IsKeyboardFocusablePropertyId, UIA_NamePropertyId, UIA_TextControlTypeId,
-    UiaDisconnectProvider, UiaHostProviderFromHwnd, UiaReturnRawElementProvider, UIA_PROPERTY_ID,
+    UIA_IsKeyboardFocusablePropertyId, UIA_IsTextPatternAvailablePropertyId, UIA_NamePropertyId,
+    UIA_TextControlTypeId, UIA_TextPatternId, UiaDisconnectProvider, UiaHostProviderFromHwnd,
+    UiaReturnRawElementProvider, UiaRootObjectId, UIA_PROPERTY_ID,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{OBJID_CLIENT, WM_GETOBJECT};
 use winit::raw_window_handle::RawWindowHandle;
+
+use crate::accessibility::snapshot::VisibleTerminalSnapshot;
+use crate::accessibility::text_pattern::{self, RawTextProvider};
 
 const E_NOINTERFACE: HRESULT = 0x8000_4002u32 as i32;
 const E_POINTER: HRESULT = 0x8000_4003u32 as i32;
@@ -60,7 +66,8 @@ impl TerminalProvider {
         match property_id {
             id if id == UIA_IsControlElementPropertyId
                 || id == UIA_IsContentElementPropertyId
-                || id == UIA_IsKeyboardFocusablePropertyId =>
+                || id == UIA_IsKeyboardFocusablePropertyId
+                || id == UIA_IsTextPatternAvailablePropertyId =>
             {
                 Some(VARIANT_TRUE != 0)
             },
@@ -74,7 +81,8 @@ impl TerminalProvider {
             id if id == UIA_NamePropertyId => Some(VT_BSTR),
             id if id == UIA_IsControlElementPropertyId
                 || id == UIA_IsContentElementPropertyId
-                || id == UIA_IsKeyboardFocusablePropertyId =>
+                || id == UIA_IsKeyboardFocusablePropertyId
+                || id == UIA_IsTextPatternAvailablePropertyId =>
             {
                 Some(VT_BOOL)
             },
@@ -117,6 +125,13 @@ impl WindowsAccessibility {
     pub fn raw_provider(&self) -> *mut c_void {
         self.provider.as_ptr().cast()
     }
+
+    pub fn update_snapshot<T: EventListener>(&self, term: &Term<T>) {
+        let snapshot = VisibleTerminalSnapshot::from_term(term);
+        unsafe {
+            (*self.provider.as_ptr()).set_text(snapshot.text().to_owned());
+        }
+    }
 }
 
 impl Drop for WindowsAccessibility {
@@ -131,7 +146,7 @@ impl Drop for WindowsAccessibility {
 
 /// Whether a Windows message is a UIA client-object provider request.
 pub fn should_handle_wm_getobject(message: u32, lparam: isize) -> bool {
-    message == WM_GETOBJECT && lparam == OBJID_CLIENT as isize
+    message == WM_GETOBJECT && (lparam == UiaRootObjectId as isize || lparam == OBJID_CLIENT as isize)
 }
 
 pub fn hwnd_from_raw_window_handle(raw_window_handle: RawWindowHandle) -> Option<HWND> {
@@ -168,24 +183,31 @@ struct RawProvider {
     ref_count: AtomicU32,
     hwnd: HWND,
     provider: TerminalProvider,
+    text_provider: NonNull<RawTextProvider>,
     #[cfg(test)]
     drop_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl RawProvider {
     fn new(hwnd: HWND, provider: TerminalProvider) -> Self {
+        let text_provider =
+            RawTextProvider::allocate_for_window(hwnd, ptr::null_mut(), String::new());
         Self {
             vtable: &RAW_PROVIDER_VTABLE,
             ref_count: AtomicU32::new(1),
             hwnd,
             provider,
+            text_provider,
             #[cfg(test)]
             drop_counter: None,
         }
     }
 
     fn allocate(hwnd: HWND, provider: TerminalProvider) -> NonNull<Self> {
-        let provider = Box::new(Self::new(hwnd, provider));
+        let mut provider = Box::new(Self::new(hwnd, provider));
+        unsafe {
+            provider.set_enclosing_provider();
+        }
         NonNull::from(Box::leak(provider))
     }
 
@@ -196,6 +218,9 @@ impl RawProvider {
         drop_counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     ) -> NonNull<Self> {
         let mut provider = Box::new(Self::new(hwnd, provider));
+        unsafe {
+            provider.set_enclosing_provider();
+        }
         provider.drop_counter = Some(drop_counter);
         NonNull::from(Box::leak(provider))
     }
@@ -203,13 +228,39 @@ impl RawProvider {
     fn as_raw(&self) -> *mut c_void {
         self as *const Self as *mut c_void
     }
+
+    unsafe fn set_enclosing_provider(&mut self) {
+        unsafe {
+            (*self.text_provider.as_ptr()).enclosing_provider = self.as_raw();
+        }
+    }
+
+    fn set_text(&self, text: String) {
+        unsafe {
+            (*self.text_provider.as_ptr()).set_text(text);
+        }
+    }
 }
 
 #[cfg(test)]
 impl Drop for RawProvider {
     fn drop(&mut self) {
+        unsafe {
+            (*self.text_provider.as_ptr()).disconnect_enclosing_provider();
+            text_pattern::text_provider_release(self.text_provider.as_ptr().cast());
+        }
         if let Some(drop_counter) = &self.drop_counter {
             drop_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl Drop for RawProvider {
+    fn drop(&mut self) {
+        unsafe {
+            (*self.text_provider.as_ptr()).disconnect_enclosing_provider();
+            text_pattern::text_provider_release(self.text_provider.as_ptr().cast());
         }
     }
 }
@@ -284,6 +335,22 @@ unsafe extern "system" fn release(this: *mut c_void) -> u32 {
     remaining
 }
 
+pub(crate) unsafe fn add_ref_raw_provider(provider: *mut c_void) -> u32 {
+    if provider.is_null() {
+        0
+    } else {
+        unsafe { add_ref(provider) }
+    }
+}
+
+pub(crate) unsafe fn release_raw_provider(provider: *mut c_void) -> u32 {
+    if provider.is_null() {
+        0
+    } else {
+        unsafe { release(provider) }
+    }
+}
+
 unsafe extern "system" fn provider_options(
     this: *mut c_void,
     options: *mut ProviderOptions,
@@ -300,16 +367,23 @@ unsafe extern "system" fn provider_options(
 }
 
 unsafe extern "system" fn get_pattern_provider(
-    _this: *mut c_void,
-    _pattern_id: i32,
+    this: *mut c_void,
+    pattern_id: i32,
     pattern_provider: *mut *mut c_void,
 ) -> HRESULT {
     if pattern_provider.is_null() {
         return E_POINTER;
     }
 
+    let provider = unsafe { &*(this as *const RawProvider) };
     unsafe {
-        *pattern_provider = ptr::null_mut();
+        if pattern_id == UIA_TextPatternId {
+            let text_provider = provider.text_provider.as_ptr().cast();
+            ((*provider.text_provider.as_ptr()).vtable.add_ref)(text_provider);
+            *pattern_provider = text_provider;
+        } else {
+            *pattern_provider = ptr::null_mut();
+        }
     }
     S_OK
 }
@@ -378,12 +452,14 @@ mod tests {
     use windows_sys::Win32::UI::Accessibility::{
         ProviderOptions_ServerSideProvider, UIA_ControlTypePropertyId,
         UIA_IsContentElementPropertyId, UIA_IsControlElementPropertyId,
-        UIA_IsKeyboardFocusablePropertyId, UIA_NamePropertyId, UIA_TextControlTypeId,
+        UIA_IsKeyboardFocusablePropertyId, UIA_IsTextPatternAvailablePropertyId,
+        UIA_NamePropertyId, UIA_TextControlTypeId, UIA_TextPatternId, UiaRootObjectId,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{OBJID_CLIENT, WM_GETOBJECT};
 
     use super::{
-        hwnd_from_raw_window_handle, should_handle_wm_getobject, RawProvider, TerminalProvider,
+        hwnd_from_raw_window_handle, release, should_handle_wm_getobject, RawProvider,
+        TerminalProvider,
     };
 
     #[test]
@@ -396,6 +472,7 @@ mod tests {
         assert_eq!(provider.property_bool(UIA_IsControlElementPropertyId), Some(true));
         assert_eq!(provider.property_bool(UIA_IsContentElementPropertyId), Some(true));
         assert_eq!(provider.property_bool(UIA_IsKeyboardFocusablePropertyId), Some(true));
+        assert_eq!(provider.property_bool(UIA_IsTextPatternAvailablePropertyId), Some(true));
         assert_eq!(provider.property_variant_type(UIA_ControlTypePropertyId), Some(VT_I4));
         assert_eq!(provider.property_variant_type(UIA_NamePropertyId), Some(VT_BSTR));
         assert_eq!(
@@ -406,6 +483,7 @@ mod tests {
 
     #[test]
     fn wm_getobject_handler_matches_uia_client_object_request() {
+        assert!(should_handle_wm_getobject(WM_GETOBJECT, UiaRootObjectId as isize));
         assert!(should_handle_wm_getobject(WM_GETOBJECT, OBJID_CLIENT as isize));
         assert!(!should_handle_wm_getobject(WM_GETOBJECT, 0));
         assert!(!should_handle_wm_getobject(0, OBJID_CLIENT as isize));
@@ -486,5 +564,109 @@ mod tests {
         }
 
         assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn raw_provider_returns_text_pattern_provider() {
+        let provider = RawProvider::new(42 as _, TerminalProvider::new("Alacritty"));
+        let raw_provider = provider.as_raw();
+
+        unsafe {
+            let mut pattern_provider = std::ptr::null_mut();
+            assert_eq!(
+                (provider.vtable.get_pattern_provider)(
+                    raw_provider,
+                    UIA_TextPatternId,
+                    &mut pattern_provider,
+                ),
+                0,
+            );
+            assert!(!pattern_provider.is_null());
+
+            let text_provider =
+                pattern_provider as *mut crate::accessibility::text_pattern::RawTextProvider;
+            (((*text_provider).vtable).release)(pattern_provider);
+        }
+    }
+
+    #[test]
+    fn text_range_enclosing_element_returns_addrefed_provider() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = RawProvider::allocate_with_drop_counter(
+            42 as _,
+            TerminalProvider::new("Alacritty"),
+            std::sync::Arc::clone(&dropped),
+        );
+        let raw_provider = provider.as_ptr().cast();
+        let vtable = unsafe { (*provider.as_ptr()).vtable };
+
+        unsafe {
+            let mut pattern_provider = std::ptr::null_mut();
+            assert_eq!(
+                (vtable.get_pattern_provider)(raw_provider, UIA_TextPatternId, &mut pattern_provider),
+                0,
+            );
+
+            let text_provider =
+                pattern_provider as *mut crate::accessibility::text_pattern::RawTextProvider;
+            let text_vtable = (*text_provider).vtable;
+            let mut range = std::ptr::null_mut();
+            assert_eq!((text_vtable.document_range)(pattern_provider, &mut range), 0);
+
+            let range_provider =
+                range as *mut crate::accessibility::text_pattern::RawTextRange;
+            let range_vtable = (*range_provider).vtable;
+            let mut enclosing = std::ptr::null_mut();
+            assert_eq!((range_vtable.get_enclosing_element)(range, &mut enclosing), 0);
+            assert_eq!(enclosing, raw_provider);
+
+            (release)(enclosing);
+            assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+            (range_vtable.release)(range);
+            (text_vtable.release)(pattern_provider);
+            assert_eq!((release)(raw_provider), 0);
+        }
+
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn text_provider_disconnects_enclosing_provider_when_window_provider_drops() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = RawProvider::allocate_with_drop_counter(
+            42 as _,
+            TerminalProvider::new("Alacritty"),
+            std::sync::Arc::clone(&dropped),
+        );
+        let raw_provider = provider.as_ptr().cast();
+        let vtable = unsafe { (*provider.as_ptr()).vtable };
+
+        unsafe {
+            let mut pattern_provider = std::ptr::null_mut();
+            assert_eq!(
+                (vtable.get_pattern_provider)(raw_provider, UIA_TextPatternId, &mut pattern_provider),
+                0,
+            );
+
+            assert_eq!((release)(raw_provider), 0);
+            assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+            let text_provider =
+                pattern_provider as *mut crate::accessibility::text_pattern::RawTextProvider;
+            let text_vtable = (*text_provider).vtable;
+            let mut range = std::ptr::null_mut();
+            assert_eq!((text_vtable.document_range)(pattern_provider, &mut range), 0);
+
+            let range_provider =
+                range as *mut crate::accessibility::text_pattern::RawTextRange;
+            let range_vtable = (*range_provider).vtable;
+            let mut enclosing = std::ptr::null_mut();
+            assert_eq!((range_vtable.get_enclosing_element)(range, &mut enclosing), 0);
+            assert!(enclosing.is_null());
+
+            (range_vtable.release)(range);
+            (text_vtable.release)(pattern_provider);
+        }
     }
 }

@@ -2,30 +2,12 @@
 Next task ID: T-008
 
 ## Summary
-Open tasks: 5 (In Progress: 0, Next Today: 1, Next This Week: 3, Next Later: 1, Blocked: 0)
-Done tasks: 2
+Open tasks: 4 (In Progress: 0, Next Today: 0, Next This Week: 3, Next Later: 1, Blocked: 0)
+Done tasks: 3
 
 ## In Progress
 
 ## Next – Today
-
-### T-003 [A11Y] Expose visible text through UIA TextPattern
-Outcome:
-- UIA `GetCurrentPattern(UIA_TextPatternId)` succeeds for the Alacritty window
-- `DocumentRange.GetText(-1)` returns visible terminal text
-- `GetVisibleRanges()` returns the visible viewport range
-- `GetSelection()` returns empty or no selection until selection support is implemented
-Proof:
-- Run: `cargo test -p alacritty accessibility::text_pattern`
-  Expect: all pass
-- Run: `cargo check -p alacritty --target x86_64-pc-windows-msvc`
-  Expect: exit=0
-- Run: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\accessibility\probe-uia-textpattern.ps1`
-  Expect: exit=0, stdout contains "DocumentRange.GetText: PASS"
-Touches: alacritty/src/accessibility/, scripts/accessibility/
-Deps: T-002
-Verify: unit-test, cli-proof, build-only
-Notes: Source plan Slice 3. The probe may be added as part of this task if no equivalent exists.
 
 ## Next – This Week
 
@@ -103,6 +85,24 @@ Notes: Source plan Slice 7. This is a follow-up after visible viewport reading a
 ## Blocked
 
 ## Done
+
+### T-003 [A11Y] Expose visible text through UIA TextPattern
+Outcome:
+- UIA `GetCurrentPattern(UIA_TextPatternId)` succeeds for the Alacritty window
+- `DocumentRange.GetText(-1)` returns visible terminal text
+- `GetVisibleRanges()` returns the visible viewport range
+- `GetSelection()` returns empty or no selection until selection support is implemented
+Proof:
+- Run: `cargo test -p alacritty accessibility::text_pattern`
+  Expect: all pass
+- Run: `cargo check -p alacritty --target x86_64-pc-windows-msvc`
+  Expect: exit=0
+- Run: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\accessibility\probe-uia-textpattern.ps1`
+  Expect: exit=0, stdout contains "DocumentRange.GetText: PASS"
+Touches: alacritty/src/accessibility/, scripts/accessibility/
+Deps: T-002
+Verify: unit-test, cli-proof, build-only
+Notes: Source plan Slice 3. The probe may be added as part of this task if no equivalent exists.
 
 ### T-002 [A11Y] Attach Windows UIA provider to Alacritty HWND
 Outcome:
