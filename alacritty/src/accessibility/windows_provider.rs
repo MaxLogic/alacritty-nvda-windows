@@ -19,12 +19,14 @@ use windows_sys::Win32::System::Variant::{
     VARENUM, VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4, VariantInit,
 };
 use windows_sys::Win32::UI::Accessibility::{
-    ProviderOptions, ProviderOptions_ServerSideProvider, UIA_ControlTypePropertyId,
-    UIA_IsContentElementPropertyId, UIA_IsControlElementPropertyId,
-    UIA_IsKeyboardFocusablePropertyId, UIA_IsTextPatternAvailablePropertyId, UIA_NamePropertyId,
-    UIA_PROPERTY_ID, UIA_Text_TextChangedEventId, UIA_Text_TextSelectionChangedEventId,
-    UIA_TextControlTypeId, UIA_TextPatternId, UiaClientsAreListening, UiaDisconnectProvider,
-    UiaHostProviderFromHwnd, UiaRaiseAutomationEvent, UiaReturnRawElementProvider, UiaRootObjectId,
+    ProviderOptions, ProviderOptions_ServerSideProvider, UIA_ActiveTextPositionChangedEventId,
+    UIA_ControlTypePropertyId, UIA_IsContentElementPropertyId, UIA_IsControlElementPropertyId,
+    UIA_IsKeyboardFocusablePropertyId, UIA_IsTextPattern2AvailablePropertyId,
+    UIA_IsTextPatternAvailablePropertyId, UIA_NamePropertyId, UIA_PROPERTY_ID,
+    UIA_Text_TextChangedEventId, UIA_Text_TextSelectionChangedEventId, UIA_TextControlTypeId,
+    UIA_TextPattern2Id, UIA_TextPatternId, UiaClientsAreListening, UiaDisconnectProvider,
+    UiaHostProviderFromHwnd, UiaRaiseActiveTextPositionChangedEvent, UiaRaiseAutomationEvent,
+    UiaReturnRawElementProvider, UiaRootObjectId,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, OBJID_CLIENT, WM_GETOBJECT};
@@ -60,6 +62,8 @@ pub(crate) trait UiaEventSink {
     fn clients_are_listening(&self) -> bool;
 
     fn raise_event(&mut self, provider: *mut c_void, event_id: i32);
+
+    fn raise_active_text_position_changed(&mut self, provider: *mut c_void);
 }
 
 #[derive(Debug)]
@@ -77,14 +81,32 @@ impl UiaEventSink for NativeUiaEventSink {
     fn raise_event(&mut self, provider: *mut c_void, event_id: i32) {
         trace_uia(&format!("raise_event {event_id}"));
         let _ = unsafe { UiaRaiseAutomationEvent(provider, event_id) };
-        if let Ok(path) = std::env::var("ALACRITTY_UIA_EVENT_TRACE") {
-            let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(
-                |mut file| {
-                    use std::io::Write;
-                    writeln!(file, "{event_id}")
-                },
-            );
+        write_event_trace(event_id);
+    }
+
+    fn raise_active_text_position_changed(&mut self, provider: *mut c_void) {
+        let range = unsafe { (*self.provider.as_ptr()).caret_range() };
+        if range.is_null() {
+            return;
         }
+
+        trace_uia("raise_active_text_position_changed 20036");
+        let _ = unsafe { UiaRaiseActiveTextPositionChangedEvent(provider, range) };
+        write_event_trace(UIA_ActiveTextPositionChangedEventId);
+        unsafe {
+            text_pattern::release_text_range(range);
+        }
+    }
+}
+
+fn write_event_trace(event_id: i32) {
+    if let Ok(path) = std::env::var("ALACRITTY_UIA_EVENT_TRACE") {
+        let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(
+            |mut file| {
+                use std::io::Write;
+                writeln!(file, "{event_id}")
+            },
+        );
     }
 }
 
@@ -102,6 +124,7 @@ pub(crate) struct UiaEventThrottle {
     has_emitted: bool,
     pending_text: bool,
     pending_selection: bool,
+    pending_active_text_position: bool,
 }
 
 impl UiaEventThrottle {
@@ -112,12 +135,19 @@ impl UiaEventThrottle {
             has_emitted: false,
             pending_text: false,
             pending_selection: false,
+            pending_active_text_position: false,
         }
     }
 
-    pub(crate) fn record_snapshot_change(&mut self, text_changed: bool, selection_changed: bool) {
+    pub(crate) fn record_snapshot_change(
+        &mut self,
+        text_changed: bool,
+        selection_changed: bool,
+        active_text_position_changed: bool,
+    ) {
         self.pending_text |= text_changed;
         self.pending_selection |= selection_changed;
+        self.pending_active_text_position |= active_text_position_changed;
     }
 
     pub(crate) fn flush_due<S: UiaEventSink>(
@@ -126,13 +156,14 @@ impl UiaEventThrottle {
         now: Instant,
         sink: &mut S,
     ) {
-        if !self.pending_text && !self.pending_selection {
+        if !self.pending_text && !self.pending_selection && !self.pending_active_text_position {
             return;
         }
 
         if !sink.clients_are_listening() {
             self.pending_text = false;
             self.pending_selection = false;
+            self.pending_active_text_position = false;
             self.last_emit = now;
             return;
         }
@@ -147,9 +178,13 @@ impl UiaEventThrottle {
         if self.pending_selection {
             sink.raise_event(provider, UIA_Text_TextSelectionChangedEventId);
         }
+        if self.pending_active_text_position {
+            sink.raise_active_text_position_changed(provider);
+        }
 
         self.pending_text = false;
         self.pending_selection = false;
+        self.pending_active_text_position = false;
         self.last_emit = now;
         self.has_emitted = true;
     }
@@ -189,7 +224,8 @@ impl TerminalProvider {
             id if id == UIA_IsControlElementPropertyId
                 || id == UIA_IsContentElementPropertyId
                 || id == UIA_IsKeyboardFocusablePropertyId
-                || id == UIA_IsTextPatternAvailablePropertyId =>
+                || id == UIA_IsTextPatternAvailablePropertyId
+                || id == UIA_IsTextPattern2AvailablePropertyId =>
             {
                 Some(VARIANT_TRUE != 0)
             },
@@ -204,7 +240,8 @@ impl TerminalProvider {
             id if id == UIA_IsControlElementPropertyId
                 || id == UIA_IsContentElementPropertyId
                 || id == UIA_IsKeyboardFocusablePropertyId
-                || id == UIA_IsTextPatternAvailablePropertyId =>
+                || id == UIA_IsTextPatternAvailablePropertyId
+                || id == UIA_IsTextPattern2AvailablePropertyId =>
             {
                 Some(VT_BOOL)
             },
@@ -262,13 +299,13 @@ impl WindowsAccessibility {
         let snapshot = VisibleTerminalSnapshot::from_term(term);
         let layout = self.layout_for_snapshot(&snapshot, size_info);
         let selection = snapshot.selection_offsets(term);
-        let (text_changed, selection_changed) =
+        let (text_changed, selection_changed, active_text_position_changed) =
             self.snapshot_changes(snapshot.text().to_owned(), snapshot.cursor(), selection.clone());
         unsafe {
             let provider = &*self.provider.as_ptr();
             provider.set_terminal_state(snapshot, layout, selection);
         }
-        self.record_and_flush_events(text_changed, selection_changed);
+        self.record_and_flush_events(text_changed, selection_changed, active_text_position_changed);
     }
 
     fn snapshot_changes(
@@ -276,20 +313,30 @@ impl WindowsAccessibility {
         text: String,
         cursor: Point<usize>,
         selection: Vec<(usize, usize)>,
-    ) -> (bool, bool) {
+    ) -> (bool, bool, bool) {
         let mut last_snapshot =
             self.last_snapshot.lock().expect("accessibility state lock poisoned");
         let text_changed = last_snapshot.as_ref().is_none_or(|snapshot| snapshot.text != text);
-        let selection_changed = last_snapshot
-            .as_ref()
-            .is_none_or(|snapshot| snapshot.cursor != cursor || snapshot.selection != selection);
+        let active_text_position_changed =
+            last_snapshot.as_ref().is_none_or(|snapshot| snapshot.cursor != cursor);
+        let selection_changed =
+            last_snapshot.as_ref().is_none_or(|snapshot| snapshot.selection != selection);
         *last_snapshot = Some(PublishedSnapshotState { text, cursor, selection });
-        (text_changed, selection_changed)
+        (text_changed, selection_changed, active_text_position_changed)
     }
 
-    fn record_and_flush_events(&self, text_changed: bool, selection_changed: bool) {
+    fn record_and_flush_events(
+        &self,
+        text_changed: bool,
+        selection_changed: bool,
+        active_text_position_changed: bool,
+    ) {
         let mut throttle = self.event_throttle.lock().expect("event throttle lock poisoned");
-        throttle.record_snapshot_change(text_changed, selection_changed);
+        throttle.record_snapshot_change(
+            text_changed,
+            selection_changed,
+            active_text_position_changed,
+        );
         let mut sink = NativeUiaEventSink { provider: self.provider };
         throttle.flush_due(self.raw_provider(), Instant::now(), &mut sink);
     }
@@ -445,6 +492,10 @@ impl RawProvider {
 
     fn has_advised_event_listeners(&self) -> bool {
         self.advised_event_listeners.load(Ordering::Relaxed) > 0
+    }
+
+    unsafe fn caret_range(&self) -> *mut c_void {
+        unsafe { (*self.text_provider.as_ptr()).caret_range() }
     }
 
     fn advise_event_added(&self) {
@@ -667,8 +718,10 @@ unsafe extern "system" fn get_pattern_provider(
 
     let provider = unsafe { &*(this as *const RawProvider) };
     unsafe {
-        if pattern_id == UIA_TextPatternId {
-            trace_uia("provider.GetPatternProvider TextPattern");
+        if pattern_id == UIA_TextPatternId || pattern_id == UIA_TextPattern2Id {
+            let pattern_name =
+                if pattern_id == UIA_TextPattern2Id { "TextPattern2" } else { "TextPattern" };
+            trace_uia(&format!("provider.GetPatternProvider {pattern_name}"));
             let text_provider = provider.text_provider.as_ptr().cast();
             ((*provider.text_provider.as_ptr()).vtable.add_ref)(text_provider);
             *pattern_provider = text_provider;
@@ -788,8 +841,9 @@ mod tests {
     use windows_sys::Win32::UI::Accessibility::{
         ProviderOptions_ServerSideProvider, UIA_ControlTypePropertyId,
         UIA_IsContentElementPropertyId, UIA_IsControlElementPropertyId,
-        UIA_IsKeyboardFocusablePropertyId, UIA_IsTextPatternAvailablePropertyId,
-        UIA_NamePropertyId, UIA_TextControlTypeId, UIA_TextPatternId, UiaRootObjectId,
+        UIA_IsKeyboardFocusablePropertyId, UIA_IsTextPattern2AvailablePropertyId,
+        UIA_IsTextPatternAvailablePropertyId, UIA_NamePropertyId, UIA_TextControlTypeId,
+        UIA_TextPattern2Id, UIA_TextPatternId, UiaRootObjectId,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{OBJID_CLIENT, WM_GETOBJECT};
 
@@ -809,10 +863,15 @@ mod tests {
         assert_eq!(provider.property_bool(UIA_IsContentElementPropertyId), Some(true));
         assert_eq!(provider.property_bool(UIA_IsKeyboardFocusablePropertyId), Some(true));
         assert_eq!(provider.property_bool(UIA_IsTextPatternAvailablePropertyId), Some(true));
+        assert_eq!(provider.property_bool(UIA_IsTextPattern2AvailablePropertyId), Some(true));
         assert_eq!(provider.property_variant_type(UIA_ControlTypePropertyId), Some(VT_I4));
         assert_eq!(provider.property_variant_type(UIA_NamePropertyId), Some(VT_BSTR));
         assert_eq!(
             provider.property_variant_type(UIA_IsKeyboardFocusablePropertyId),
+            Some(VT_BOOL)
+        );
+        assert_eq!(
+            provider.property_variant_type(UIA_IsTextPattern2AvailablePropertyId),
             Some(VT_BOOL)
         );
     }
@@ -913,6 +972,29 @@ mod tests {
                 (provider.vtable.get_pattern_provider)(
                     raw_provider,
                     UIA_TextPatternId,
+                    &mut pattern_provider,
+                ),
+                0,
+            );
+            assert!(!pattern_provider.is_null());
+
+            let text_provider =
+                pattern_provider as *mut crate::accessibility::text_pattern::RawTextProvider;
+            (((*text_provider).vtable).release)(pattern_provider);
+        }
+    }
+
+    #[test]
+    fn raw_provider_returns_text_pattern2_provider() {
+        let provider = RawProvider::new(42 as _, TerminalProvider::new("Alacritty"));
+        let raw_provider = provider.as_raw();
+
+        unsafe {
+            let mut pattern_provider = std::ptr::null_mut();
+            assert_eq!(
+                (provider.vtable.get_pattern_provider)(
+                    raw_provider,
+                    UIA_TextPattern2Id,
                     &mut pattern_provider,
                 ),
                 0,
