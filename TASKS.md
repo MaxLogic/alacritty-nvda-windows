@@ -2,31 +2,14 @@
 Next task ID: T-008
 
 ## Summary
-Open tasks: 4 (In Progress: 0, Next Today: 0, Next This Week: 3, Next Later: 1, Blocked: 0)
-Done tasks: 3
+Open tasks: 3 (In Progress: 0, Next Today: 0, Next This Week: 2, Next Later: 1, Blocked: 0)
+Done tasks: 4
 
 ## In Progress
 
 ## Next – Today
 
 ## Next – This Week
-
-### T-004 [A11Y] Implement UIA text range navigation
-Outcome:
-- UIA text ranges support clone, endpoint comparison, endpoint movement, enclosing-unit expansion, and text retrieval
-- line, word, and character navigation operate predictably across empty rows and wrapped rows
-- Terminal Access for NVDA current, previous, and next line commands can read Alacritty output
-Proof:
-- Run: `cargo test -p alacritty accessibility::text_range`
-  Expect: all pass
-- Run: `cargo check -p alacritty --target x86_64-pc-windows-msvc`
-  Expect: exit=0
-- Run: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\accessibility\probe-uia-navigation.ps1`
-  Expect: exit=0, stdout contains "Line navigation: PASS"
-Touches: alacritty/src/accessibility/, scripts/accessibility/
-Deps: T-003
-Verify: unit-test, cli-proof, manual
-Notes: Source plan Slice 4. Keep implementation focused on units Terminal Access exercises first.
 
 ### T-005 [A11Y] Map mouse coordinates with UIA RangeFromPoint
 Outcome:
@@ -85,6 +68,23 @@ Notes: Source plan Slice 7. This is a follow-up after visible viewport reading a
 ## Blocked
 
 ## Done
+
+### T-004 [A11Y] Implement UIA text range navigation
+Outcome:
+- UIA text ranges support clone, endpoint comparison, endpoint movement, enclosing-unit expansion, and text retrieval
+- line, word, and character navigation operate predictably across empty rows and wrapped rows
+- Terminal Access for NVDA current, previous, and next line commands can read Alacritty output
+Proof:
+- Run: `cargo test -p alacritty accessibility::text_range`
+  Expect: all pass
+- Run: `cargo check -p alacritty --target x86_64-pc-windows-msvc`
+  Expect: exit=0
+- Run: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\accessibility\probe-uia-navigation.ps1`
+  Expect: exit=0, stdout contains "Line navigation: PASS"
+Touches: alacritty/src/accessibility/, scripts/accessibility/
+Deps: T-003
+Verify: unit-test, cli-proof, manual
+Notes: Source plan Slice 4. Keep implementation focused on units Terminal Access exercises first.
 
 ### T-003 [A11Y] Expose visible text through UIA TextPattern
 Outcome:

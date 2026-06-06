@@ -14,8 +14,9 @@ use windows_sys::Win32::System::Ole::{
 };
 use windows_sys::Win32::System::Variant::{VariantInit, VARENUM, VARIANT, VT_EMPTY, VT_UNKNOWN};
 use windows_sys::Win32::UI::Accessibility::{
-    SupportedTextSelection, SupportedTextSelection_None, TextPatternRangeEndpoint, TextUnit,
-    UiaPoint, UIA_TEXTATTRIBUTE_ID,
+    SupportedTextSelection, SupportedTextSelection_None, TextPatternRangeEndpoint,
+    TextPatternRangeEndpoint_Start, TextUnit, TextUnit_Character, TextUnit_Document, TextUnit_Line,
+    TextUnit_Word, UiaPoint, UIA_TEXTATTRIBUTE_ID,
 };
 
 use crate::accessibility::windows_provider::{add_ref_raw_provider, release_raw_provider};
@@ -267,6 +268,14 @@ impl RawTextRange {
             text.chars().take(max_length as usize).collect()
         }
     }
+
+    fn endpoint_offset(&self, endpoint: TextPatternRangeEndpoint) -> usize {
+        if endpoint == TextPatternRangeEndpoint_Start {
+            self.start
+        } else {
+            self.end
+        }
+    }
 }
 
 impl Drop for RawTextRange {
@@ -285,14 +294,15 @@ pub(crate) struct RawTextRangeVtable {
     pub(crate) release: unsafe extern "system" fn(*mut c_void) -> u32,
     clone: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
     compare: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut BOOL) -> HRESULT,
-    compare_endpoints: unsafe extern "system" fn(
+    pub(crate) compare_endpoints: unsafe extern "system" fn(
         *mut c_void,
         TextPatternRangeEndpoint,
         *mut c_void,
         TextPatternRangeEndpoint,
         *mut i32,
     ) -> HRESULT,
-    expand_to_enclosing_unit: unsafe extern "system" fn(*mut c_void, TextUnit) -> HRESULT,
+    pub(crate) expand_to_enclosing_unit:
+        unsafe extern "system" fn(*mut c_void, TextUnit) -> HRESULT,
     find_attribute: unsafe extern "system" fn(
         *mut c_void,
         UIA_TEXTATTRIBUTE_ID,
@@ -308,15 +318,16 @@ pub(crate) struct RawTextRangeVtable {
     pub(crate) get_enclosing_element:
         unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
     pub(crate) get_text: unsafe extern "system" fn(*mut c_void, i32, *mut BSTR) -> HRESULT,
-    move_range: unsafe extern "system" fn(*mut c_void, TextUnit, i32, *mut i32) -> HRESULT,
-    move_endpoint_by_unit: unsafe extern "system" fn(
+    pub(crate) move_range:
+        unsafe extern "system" fn(*mut c_void, TextUnit, i32, *mut i32) -> HRESULT,
+    pub(crate) move_endpoint_by_unit: unsafe extern "system" fn(
         *mut c_void,
         TextPatternRangeEndpoint,
         TextUnit,
         i32,
         *mut i32,
     ) -> HRESULT,
-    move_endpoint_by_range: unsafe extern "system" fn(
+    pub(crate) move_endpoint_by_range: unsafe extern "system" fn(
         *mut c_void,
         TextPatternRangeEndpoint,
         *mut c_void,
@@ -433,24 +444,49 @@ unsafe extern "system" fn text_range_compare(
 }
 
 unsafe extern "system" fn text_range_compare_endpoints(
-    _this: *mut c_void,
-    _endpoint: TextPatternRangeEndpoint,
-    _target_range: *mut c_void,
-    _target_endpoint: TextPatternRangeEndpoint,
+    this: *mut c_void,
+    endpoint: TextPatternRangeEndpoint,
+    target_range: *mut c_void,
+    target_endpoint: TextPatternRangeEndpoint,
     comparison: *mut i32,
 ) -> HRESULT {
     if comparison.is_null() {
         return E_POINTER;
     }
 
-    unsafe { *comparison = 0 };
+    if target_range.is_null() {
+        return E_INVALIDARG;
+    }
+
+    let source = unsafe { &*(this as *const RawTextRange) };
+    let target = unsafe { &*(target_range as *const RawTextRange) };
+    let source_offset = source.endpoint_offset(endpoint);
+    let target_offset = target.endpoint_offset(target_endpoint);
+    unsafe { *comparison = source_offset.cmp(&target_offset) as i32 };
     S_OK
 }
 
 unsafe extern "system" fn text_range_expand_to_enclosing_unit(
-    _this: *mut c_void,
-    _unit: TextUnit,
+    this: *mut c_void,
+    unit: TextUnit,
 ) -> HRESULT {
+    let range = unsafe { &mut *(this as *mut RawTextRange) };
+    if unit == TextUnit_Character {
+        let start = previous_char_boundary(&range.text, range.start);
+        range.start = start;
+        range.end = next_char_boundary(&range.text, start);
+    } else if unit == TextUnit_Word {
+        let (start, end) = word_bounds(&range.text, range.start);
+        range.start = start;
+        range.end = end;
+    } else if unit == TextUnit_Line {
+        let (start, end) = line_bounds(&range.text, range.start);
+        range.start = start;
+        range.end = end;
+    } else if unit == TextUnit_Document {
+        range.start = 0;
+        range.end = range.text.len();
+    }
     S_OK
 }
 
@@ -544,40 +580,100 @@ unsafe extern "system" fn text_range_get_text(
 }
 
 unsafe extern "system" fn text_range_move(
-    _this: *mut c_void,
-    _unit: TextUnit,
-    _count: i32,
+    this: *mut c_void,
+    unit: TextUnit,
+    count: i32,
     moved: *mut i32,
 ) -> HRESULT {
     if moved.is_null() {
         return E_POINTER;
     }
 
-    unsafe { *moved = 0 };
+    if count == 0 {
+        unsafe { *moved = 0 };
+        return S_OK;
+    }
+
+    let range = unsafe { &mut *(this as *mut RawTextRange) };
+    let width = range.end.saturating_sub(range.start);
+    let start = normalized_unit_start(&range.text, range.start, unit);
+    let (new_start, actual) = move_offset_by_unit(&range.text, start, unit, count);
+    range.start = new_start;
+    if unit == TextUnit_Word {
+        let (_, end) = word_bounds(&range.text, new_start);
+        range.end = end;
+    } else if unit == TextUnit_Line {
+        let (_, end) = line_bounds(&range.text, new_start);
+        range.end = end;
+    } else {
+        range.end = clamp_to_boundary(&range.text, new_start.saturating_add(width));
+    }
+    unsafe { *moved = actual };
     S_OK
 }
 
 unsafe extern "system" fn text_range_move_endpoint_by_unit(
-    _this: *mut c_void,
-    _endpoint: TextPatternRangeEndpoint,
-    _unit: TextUnit,
-    _count: i32,
+    this: *mut c_void,
+    endpoint: TextPatternRangeEndpoint,
+    unit: TextUnit,
+    count: i32,
     moved: *mut i32,
 ) -> HRESULT {
     if moved.is_null() {
         return E_POINTER;
     }
 
-    unsafe { *moved = 0 };
+    if count == 0 {
+        unsafe { *moved = 0 };
+        return S_OK;
+    }
+
+    let range = unsafe { &mut *(this as *mut RawTextRange) };
+    let offset = normalized_unit_start(&range.text, range.endpoint_offset(endpoint), unit);
+    let (new_offset, actual) = move_offset_by_unit(&range.text, offset, unit, count);
+
+    if endpoint == TextPatternRangeEndpoint_Start {
+        range.start = new_offset;
+        if range.start > range.end {
+            range.end = range.start;
+        }
+    } else {
+        range.end = new_offset;
+        if range.end < range.start {
+            range.start = range.end;
+        }
+    }
+
+    unsafe { *moved = actual };
     S_OK
 }
 
 unsafe extern "system" fn text_range_move_endpoint_by_range(
-    _this: *mut c_void,
-    _endpoint: TextPatternRangeEndpoint,
-    _target_range: *mut c_void,
-    _target_endpoint: TextPatternRangeEndpoint,
+    this: *mut c_void,
+    endpoint: TextPatternRangeEndpoint,
+    target_range: *mut c_void,
+    target_endpoint: TextPatternRangeEndpoint,
 ) -> HRESULT {
+    if target_range.is_null() {
+        return E_INVALIDARG;
+    }
+
+    let range = unsafe { &mut *(this as *mut RawTextRange) };
+    let target = unsafe { &*(target_range as *const RawTextRange) };
+    let target_offset = target.endpoint_offset(target_endpoint);
+
+    if endpoint == TextPatternRangeEndpoint_Start {
+        range.start = target_offset;
+        if range.start > range.end {
+            range.end = range.start;
+        }
+    } else {
+        range.end = target_offset;
+        if range.end < range.start {
+            range.start = range.end;
+        }
+    }
+
     S_OK
 }
 
@@ -639,6 +735,148 @@ fn empty_unknown_safearray() -> *mut SAFEARRAY {
 
 fn empty_array(vartype: VARENUM) -> *mut SAFEARRAY {
     unsafe { SafeArrayCreateVector(vartype, 0, 0) }
+}
+
+fn move_offset_by_unit(text: &str, offset: usize, unit: TextUnit, count: i32) -> (usize, i32) {
+    if unit == TextUnit_Character {
+        move_offset_by_boundaries(text, offset, count, char_boundaries(text))
+    } else if unit == TextUnit_Word {
+        move_offset_by_boundaries(text, offset, count, word_starts(text))
+    } else if unit == TextUnit_Line {
+        move_offset_by_boundaries(text, offset, count, line_starts(text))
+    } else if unit == TextUnit_Document {
+        if count > 0 && offset < text.len() {
+            (text.len(), 1)
+        } else if count < 0 && offset > 0 {
+            (0, -1)
+        } else {
+            (offset, 0)
+        }
+    } else {
+        (offset, 0)
+    }
+}
+
+fn normalized_unit_start(text: &str, offset: usize, unit: TextUnit) -> usize {
+    if unit == TextUnit_Word {
+        word_bounds(text, offset).0
+    } else if unit == TextUnit_Line {
+        line_bounds(text, offset).0
+    } else {
+        offset
+    }
+}
+
+fn move_offset_by_boundaries(
+    _text: &str,
+    offset: usize,
+    count: i32,
+    mut boundaries: Vec<usize>,
+) -> (usize, i32) {
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let current = boundaries.partition_point(|boundary| *boundary < offset);
+
+    if count >= 0 {
+        let target = (current + count as usize).min(boundaries.len().saturating_sub(1));
+        (boundaries[target], target.saturating_sub(current) as i32)
+    } else {
+        let target = current.saturating_sub((-count) as usize);
+        (boundaries[target], -(current.saturating_sub(target) as i32))
+    }
+}
+
+fn char_boundaries(text: &str) -> Vec<usize> {
+    text.char_indices().map(|(index, _)| index).chain([text.len()]).collect()
+}
+
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(text.match_indices('\n').map(|(index, _)| index + 1));
+    starts.push(text.len());
+    starts
+}
+
+fn word_starts(text: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut in_word = false;
+    for (index, character) in text.char_indices() {
+        if character.is_alphanumeric() || character == '_' {
+            if !in_word {
+                starts.push(index);
+                in_word = true;
+            }
+        } else {
+            in_word = false;
+        }
+    }
+    starts.push(text.len());
+    starts
+}
+
+fn line_bounds(text: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(text.len());
+    let start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let end = text[offset..].find('\n').map_or(text.len(), |index| offset + index);
+    (start, end)
+}
+
+fn word_bounds(text: &str, offset: usize) -> (usize, usize) {
+    let offset = previous_char_boundary(text, offset.min(text.len()));
+    let mut start = offset;
+    while start > 0 {
+        let previous = previous_char_boundary(text, start - 1);
+        let character = text[previous..start].chars().next().unwrap();
+        if !(character.is_alphanumeric() || character == '_') {
+            break;
+        }
+        start = previous;
+    }
+
+    if start == offset
+        && text[start..]
+            .chars()
+            .next()
+            .is_none_or(|character| !(character.is_alphanumeric() || character == '_'))
+    {
+        start = text[offset..]
+            .char_indices()
+            .find(|(_, character)| character.is_alphanumeric() || *character == '_')
+            .map_or(text.len(), |(index, _)| offset + index);
+    }
+
+    let mut end = start;
+    for (index, character) in text[start..].char_indices() {
+        if !(character.is_alphanumeric() || character == '_') {
+            break;
+        }
+        end = start + index + character.len_utf8();
+    }
+
+    (start, end)
+}
+
+fn previous_char_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+fn next_char_boundary(text: &str, offset: usize) -> usize {
+    let mut offset = offset.min(text.len());
+    if offset < text.len() {
+        offset += 1;
+    }
+    while !text.is_char_boundary(offset) {
+        offset += 1;
+    }
+    offset
+}
+
+fn clamp_to_boundary(text: &str, offset: usize) -> usize {
+    previous_char_boundary(text, offset.min(text.len()))
 }
 
 fn string_to_bstr(value: &str) -> BSTR {
