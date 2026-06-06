@@ -41,9 +41,11 @@ use winit::window::{
 
 use alacritty_terminal::index::Point;
 
+#[cfg(windows)]
+use crate::accessibility::windows_provider::{hwnd_from_raw_window_handle, WindowsAccessibility};
 use crate::cli::WindowOptions;
-use crate::config::UiConfig;
 use crate::config::window::{Decorations, Identity, WindowConfig};
+use crate::config::UiConfig;
 use crate::display::SizeInfo;
 
 /// Window icon for `_NET_WM_ICON` property.
@@ -113,6 +115,8 @@ pub struct Window {
     /// Hold the window when terminal exits.
     pub hold: bool,
 
+    #[cfg(windows)]
+    _accessibility: Option<WindowsAccessibility>,
     window: WinitWindow,
 
     /// Current window title.
@@ -201,7 +205,11 @@ impl Window {
 
         let scale_factor = window.scale_factor();
         log::info!("Window scale factor: {scale_factor}");
-        let is_x11 = matches!(window.window_handle().unwrap().as_raw(), RawWindowHandle::Xlib(_));
+        let raw_window_handle = window.window_handle().unwrap().as_raw();
+        let is_x11 = matches!(raw_window_handle, RawWindowHandle::Xlib(_));
+        #[cfg(windows)]
+        let accessibility = hwnd_from_raw_window_handle(raw_window_handle)
+            .and_then(|hwnd| unsafe { WindowsAccessibility::new(hwnd, identity.title.clone()) });
 
         Ok(Self {
             hold: options.terminal_options.hold,
@@ -211,6 +219,8 @@ impl Window {
             mouse_visible: true,
             has_frame: true,
             scale_factor,
+            #[cfg(windows)]
+            _accessibility: accessibility,
             window,
             is_x11,
             ime_inhibitor: Default::default(),
