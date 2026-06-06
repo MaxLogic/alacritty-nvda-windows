@@ -1,5 +1,7 @@
 //! Accessibility support.
 
+#[cfg(windows)]
+pub mod range_from_point;
 pub mod snapshot;
 #[cfg(windows)]
 pub mod text_pattern;

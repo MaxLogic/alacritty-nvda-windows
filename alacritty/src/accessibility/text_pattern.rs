@@ -19,6 +19,7 @@ use windows_sys::Win32::UI::Accessibility::{
     TextUnit_Word, UiaPoint, UIA_TEXTATTRIBUTE_ID,
 };
 
+use crate::accessibility::snapshot::VisibleTerminalSnapshot;
 use crate::accessibility::windows_provider::{add_ref_raw_provider, release_raw_provider};
 
 const E_INVALIDARG: HRESULT = 0x8007_0057u32 as i32;
@@ -34,9 +35,76 @@ const IID_ITEXT_RANGE_PROVIDER: GUID = GUID::from_u128(0x5347ad7b_c355_46f8_aff5
 pub struct RawTextProvider {
     pub(crate) vtable: &'static RawTextProviderVtable,
     ref_count: AtomicU32,
-    text: RwLock<String>,
+    state: RwLock<TextProviderState>,
     hwnd: HWND,
     pub(crate) enclosing_provider: *mut c_void,
+}
+
+#[derive(Clone, Debug)]
+struct TextProviderState {
+    text: String,
+    terminal: Option<VisibleTerminalSnapshot>,
+    layout: Option<TextProviderLayout>,
+}
+
+impl TextProviderState {
+    fn from_text(text: String) -> Self {
+        Self { text, terminal: None, layout: None }
+    }
+
+    fn from_terminal(snapshot: VisibleTerminalSnapshot, layout: Option<TextProviderLayout>) -> Self {
+        Self { text: snapshot.text().to_owned(), terminal: Some(snapshot), layout }
+    }
+
+    fn offset_for_point(&self, row: usize, column: usize) -> usize {
+        if let Some(snapshot) = &self.terminal {
+            return snapshot
+                .offset_for_point(alacritty_terminal::index::Point::new(
+                    row,
+                    alacritty_terminal::index::Column(column),
+                ))
+                .unwrap_or(self.text.len());
+        }
+
+        offset_for_line_column(&self.text, row, column)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TextProviderLayout {
+    origin_x: f64,
+    origin_y: f64,
+    cell_width: f64,
+    cell_height: f64,
+    columns: usize,
+    rows: usize,
+}
+
+impl TextProviderLayout {
+    pub(crate) fn new(
+        origin_x: f64,
+        origin_y: f64,
+        cell_width: f64,
+        cell_height: f64,
+        columns: usize,
+        rows: usize,
+    ) -> Self {
+        Self { origin_x, origin_y, cell_width, cell_height, columns, rows }
+    }
+
+    fn point_to_cell(self, point: UiaPoint) -> Option<(usize, usize)> {
+        if self.cell_width <= 0.0 || self.cell_height <= 0.0 || self.columns == 0 || self.rows == 0
+        {
+            return None;
+        }
+
+        let column = ((point.x - self.origin_x) / self.cell_width).floor() as isize;
+        let row = ((point.y - self.origin_y) / self.cell_height).floor() as isize;
+        let column = column.clamp(0, self.columns.saturating_sub(1) as isize) as usize;
+        let row = row.clamp(0, self.rows.saturating_sub(1) as isize) as usize;
+
+        Some((row, column))
+    }
 }
 
 impl RawTextProvider {
@@ -53,15 +121,45 @@ impl RawTextProvider {
         let provider = Box::new(Self {
             vtable: &RAW_TEXT_PROVIDER_VTABLE,
             ref_count: AtomicU32::new(1),
-            text: RwLock::new(text),
+            state: RwLock::new(TextProviderState::from_text(text)),
             hwnd,
             enclosing_provider,
         });
         NonNull::from(Box::leak(provider))
     }
 
-    pub(crate) fn set_text(&self, text: String) {
-        *self.text.write().expect("text provider lock poisoned") = text;
+    pub(crate) fn set_terminal_state(
+        &self,
+        snapshot: VisibleTerminalSnapshot,
+        layout: Option<TextProviderLayout>,
+    ) {
+        *self.state.write().expect("text provider lock poisoned") =
+            TextProviderState::from_terminal(snapshot, layout);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_layout(
+        &self,
+        origin_x: f64,
+        origin_y: f64,
+        cell_width: f64,
+        cell_height: f64,
+        columns: usize,
+        rows: usize,
+    ) {
+        let text = self.text();
+        let snapshot = VisibleTerminalSnapshot::from_text_for_tests(&text, columns, rows);
+        self.set_terminal_state(
+            snapshot,
+            Some(TextProviderLayout::new(
+                origin_x,
+                origin_y,
+                cell_width,
+                cell_height,
+                columns,
+                rows,
+            )),
+        );
     }
 
     pub(crate) fn disconnect_enclosing_provider(&mut self) {
@@ -69,7 +167,17 @@ impl RawTextProvider {
     }
 
     fn text(&self) -> String {
-        self.text.read().expect("text provider lock poisoned").clone()
+        self.state.read().expect("text provider lock poisoned").text.clone()
+    }
+
+    fn range_from_point(&self, point: UiaPoint) -> (String, usize) {
+        let state = self.state.read().expect("text provider lock poisoned").clone();
+        let offset = state
+            .layout
+            .and_then(|layout| layout.point_to_cell(point))
+            .map_or(0, |(row, column)| state.offset_for_point(row, column));
+
+        (state.text, offset)
     }
 }
 
@@ -83,7 +191,8 @@ pub(crate) struct RawTextProviderVtable {
     get_visible_ranges: unsafe extern "system" fn(*mut c_void, *mut *mut SAFEARRAY) -> HRESULT,
     range_from_child:
         unsafe extern "system" fn(*mut c_void, *mut c_void, *mut *mut c_void) -> HRESULT,
-    range_from_point: unsafe extern "system" fn(*mut c_void, UiaPoint, *mut *mut c_void) -> HRESULT,
+    pub(crate) range_from_point:
+        unsafe extern "system" fn(*mut c_void, UiaPoint, *mut *mut c_void) -> HRESULT,
     pub(crate) document_range: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
     pub(crate) supported_text_selection:
         unsafe extern "system" fn(*mut c_void, *mut SupportedTextSelection) -> HRESULT,
@@ -195,10 +304,18 @@ unsafe extern "system" fn text_provider_range_from_child(
 
 unsafe extern "system" fn text_provider_range_from_point(
     this: *mut c_void,
-    _point: UiaPoint,
+    point: UiaPoint,
     range: *mut *mut c_void,
 ) -> HRESULT {
-    unsafe { text_provider_document_range(this, range) }
+    if range.is_null() {
+        return E_POINTER;
+    }
+
+    let provider = unsafe { &*(this as *const RawTextProvider) };
+    let (text, offset) = provider.range_from_point(point);
+    let text_range = RawTextRange::allocate(text, offset, offset, provider.enclosing_provider);
+    unsafe { *range = text_range.as_ptr().cast() };
+    S_OK
 }
 
 unsafe extern "system" fn text_provider_document_range(
@@ -819,6 +936,16 @@ fn line_bounds(text: &str, offset: usize) -> (usize, usize) {
     let start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
     let end = text[offset..].find('\n').map_or(text.len(), |index| offset + index);
     (start, end)
+}
+
+fn offset_for_line_column(text: &str, row: usize, column: usize) -> usize {
+    let line_start = line_starts(text).get(row).copied().unwrap_or(text.len());
+    let line_end = text[line_start..].find('\n').map_or(text.len(), |index| line_start + index);
+
+    text[line_start..line_end]
+        .char_indices()
+        .nth(column)
+        .map_or(line_end, |(index, _)| line_start + index)
 }
 
 fn word_bounds(text: &str, offset: usize) -> (usize, usize) {

@@ -2,31 +2,14 @@
 Next task ID: T-008
 
 ## Summary
-Open tasks: 3 (In Progress: 0, Next Today: 0, Next This Week: 2, Next Later: 1, Blocked: 0)
-Done tasks: 4
+Open tasks: 2 (In Progress: 0, Next Today: 0, Next This Week: 1, Next Later: 1, Blocked: 0)
+Done tasks: 5
 
 ## In Progress
 
 ## Next – Today
 
 ## Next – This Week
-
-### T-005 [A11Y] Map mouse coordinates with UIA RangeFromPoint
-Outcome:
-- `RangeFromPoint` maps screen coordinates inside the text area to the nearest terminal row and column
-- points in padding or outside exact cell bounds clamp to a deterministic nearest text range
-- a client can expand the returned range to a line and read the row under the mouse
-Proof:
-- Run: `cargo test -p alacritty accessibility::range_from_point`
-  Expect: all pass
-- Run: `cargo check -p alacritty --target x86_64-pc-windows-msvc`
-  Expect: exit=0
-- Run: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\accessibility\probe-uia-range-from-point.ps1`
-  Expect: exit=0, stdout contains "RangeFromPoint line read: PASS"
-Touches: alacritty/src/accessibility/, alacritty/src/display/, scripts/accessibility/
-Deps: T-003
-Verify: unit-test, cli-proof, manual
-Notes: Source plan Slice 5. Keep this as standard UIA hit testing; do not add custom speech to Alacritty.
 
 ### T-006 [A11Y] Throttle UIA text and caret events
 Outcome:
@@ -68,6 +51,23 @@ Notes: Source plan Slice 7. This is a follow-up after visible viewport reading a
 ## Blocked
 
 ## Done
+
+### T-005 [A11Y] Map mouse coordinates with UIA RangeFromPoint
+Outcome:
+- `RangeFromPoint` maps screen coordinates inside the text area to the nearest terminal row and column
+- points in padding or outside exact cell bounds clamp to a deterministic nearest text range
+- a client can expand the returned range to a line and read the row under the mouse
+Proof:
+- Run: `cargo test -p alacritty accessibility::range_from_point`
+  Expect: all pass
+- Run: `cargo check -p alacritty --target x86_64-pc-windows-msvc`
+  Expect: exit=0
+- Run: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\accessibility\probe-uia-range-from-point.ps1`
+  Expect: exit=0, stdout contains "RangeFromPoint line read: PASS"
+Touches: alacritty/src/accessibility/, alacritty/src/display/, scripts/accessibility/
+Deps: T-003
+Verify: unit-test, cli-proof, manual
+Notes: Source plan Slice 5. Keep this as standard UIA hit testing; do not add custom speech to Alacritty.
 
 ### T-004 [A11Y] Implement UIA text range navigation
 Outcome:

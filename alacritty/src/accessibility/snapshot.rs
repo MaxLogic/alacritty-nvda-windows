@@ -2,8 +2,8 @@
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::Term;
 
 /// Immutable snapshot of the terminal's visible text.
 #[derive(Clone, Debug)]
@@ -49,6 +49,25 @@ impl VisibleTerminalSnapshot {
             .unwrap_or_else(|| Point::new(0, Column(0)));
 
         Self { text, rows, columns, cursor }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_text_for_tests(text: &str, columns: usize, screen_lines: usize) -> Self {
+        let mut rows = Vec::with_capacity(screen_lines);
+        let mut snapshot_text = String::new();
+
+        for line in 0..screen_lines {
+            if line > 0 {
+                snapshot_text.push('\n');
+            }
+
+            let row_text = text.split('\n').nth(line).unwrap_or_default().to_owned();
+            let start_offset = snapshot_text.len();
+            snapshot_text.push_str(&row_text);
+            rows.push(SnapshotRow::from_text(row_text, start_offset, columns));
+        }
+
+        Self { text: snapshot_text, rows, columns, cursor: Point::new(0, Column(0)) }
     }
 
     /// Newline-separated visible terminal text.
@@ -133,6 +152,19 @@ impl SnapshotRow {
 
         column_offsets.push(text.len());
         text.truncate(text.trim_end_matches(' ').len());
+
+        Self { text, start_offset, column_offsets }
+    }
+
+    #[cfg(test)]
+    fn from_text(text: String, start_offset: usize, columns: usize) -> Self {
+        let mut column_offsets = Vec::with_capacity(columns + 1);
+        let mut char_offsets: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+        char_offsets.push(text.len());
+
+        for column in 0..=columns {
+            column_offsets.push(*char_offsets.get(column).unwrap_or(&text.len()));
+        }
 
         Self { text, start_offset, column_offsets }
     }

@@ -8,7 +8,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::term::Term;
 use windows_sys::core::{BSTR, GUID, HRESULT};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, S_OK, VARIANT_TRUE, WPARAM};
+use windows_sys::Win32::Foundation::{
+    HWND, LPARAM, LRESULT, POINT, RECT, S_OK, VARIANT_TRUE, WPARAM,
+};
+use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::Variant::{
     VariantInit, VARENUM, VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4,
 };
@@ -20,11 +23,12 @@ use windows_sys::Win32::UI::Accessibility::{
     UiaReturnRawElementProvider, UiaRootObjectId, UIA_PROPERTY_ID,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-use windows_sys::Win32::UI::WindowsAndMessaging::{OBJID_CLIENT, WM_GETOBJECT};
+use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, OBJID_CLIENT, WM_GETOBJECT};
 use winit::raw_window_handle::RawWindowHandle;
 
 use crate::accessibility::snapshot::VisibleTerminalSnapshot;
-use crate::accessibility::text_pattern::{self, RawTextProvider};
+use crate::accessibility::text_pattern::{self, RawTextProvider, TextProviderLayout};
+use crate::display::SizeInfo;
 
 const E_NOINTERFACE: HRESULT = 0x8000_4002u32 as i32;
 const E_POINTER: HRESULT = 0x8000_4003u32 as i32;
@@ -126,11 +130,38 @@ impl WindowsAccessibility {
         self.provider.as_ptr().cast()
     }
 
-    pub fn update_snapshot<T: EventListener>(&self, term: &Term<T>) {
+    pub fn update_snapshot<T: EventListener>(&self, term: &Term<T>, size_info: &SizeInfo) {
         let snapshot = VisibleTerminalSnapshot::from_term(term);
+        let layout = self.layout_for_snapshot(&snapshot, size_info);
         unsafe {
-            (*self.provider.as_ptr()).set_text(snapshot.text().to_owned());
+            let provider = &*self.provider.as_ptr();
+            provider.set_terminal_state(snapshot, layout);
         }
+    }
+
+    fn layout_for_snapshot(
+        &self,
+        snapshot: &VisibleTerminalSnapshot,
+        size_info: &SizeInfo,
+    ) -> Option<TextProviderLayout> {
+        let mut rect: RECT = unsafe { std::mem::zeroed() };
+        let mut origin = POINT { x: 0, y: 0 };
+        unsafe {
+            if GetClientRect(self.hwnd, &mut rect) == 0
+                || ClientToScreen(self.hwnd, &mut origin) == 0
+            {
+                return None;
+            }
+        }
+
+        Some(TextProviderLayout::new(
+            f64::from(origin.x) + f64::from(size_info.padding_x()),
+            f64::from(origin.y) + f64::from(size_info.padding_y()),
+            f64::from(size_info.cell_width()),
+            f64::from(size_info.cell_height()),
+            snapshot.columns(),
+            snapshot.screen_lines(),
+        ))
     }
 }
 
@@ -146,7 +177,8 @@ impl Drop for WindowsAccessibility {
 
 /// Whether a Windows message is a UIA client-object provider request.
 pub fn should_handle_wm_getobject(message: u32, lparam: isize) -> bool {
-    message == WM_GETOBJECT && (lparam == UiaRootObjectId as isize || lparam == OBJID_CLIENT as isize)
+    message == WM_GETOBJECT
+        && (lparam == UiaRootObjectId as isize || lparam == OBJID_CLIENT as isize)
 }
 
 pub fn hwnd_from_raw_window_handle(raw_window_handle: RawWindowHandle) -> Option<HWND> {
@@ -235,9 +267,13 @@ impl RawProvider {
         }
     }
 
-    fn set_text(&self, text: String) {
+    fn set_terminal_state(
+        &self,
+        snapshot: VisibleTerminalSnapshot,
+        layout: Option<TextProviderLayout>,
+    ) {
         unsafe {
-            (*self.text_provider.as_ptr()).set_text(text);
+            (*self.text_provider.as_ptr()).set_terminal_state(snapshot, layout);
         }
     }
 }
