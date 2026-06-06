@@ -249,11 +249,12 @@ impl WindowsAccessibility {
     pub fn update_snapshot<T: EventListener>(&self, term: &Term<T>, size_info: &SizeInfo) {
         let snapshot = VisibleTerminalSnapshot::from_term(term);
         let layout = self.layout_for_snapshot(&snapshot, size_info);
+        let selection = snapshot.selection_offsets(term);
         let (text_changed, caret_changed) =
             self.snapshot_changes(snapshot.text().to_owned(), snapshot.cursor());
         unsafe {
             let provider = &*self.provider.as_ptr();
-            provider.set_terminal_state(snapshot, layout);
+            provider.set_terminal_state(snapshot, layout, selection);
         }
         self.record_and_flush_events(text_changed, caret_changed);
     }
@@ -417,9 +418,10 @@ impl RawProvider {
         &self,
         snapshot: VisibleTerminalSnapshot,
         layout: Option<TextProviderLayout>,
+        selection: Vec<(usize, usize)>,
     ) {
         unsafe {
-            (*self.text_provider.as_ptr()).set_terminal_state(snapshot, layout);
+            (*self.text_provider.as_ptr()).set_terminal_state(snapshot, layout, selection);
         }
     }
 

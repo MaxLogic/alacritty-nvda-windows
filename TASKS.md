@@ -2,8 +2,8 @@
 Next task ID: T-008
 
 ## Summary
-Open tasks: 1 (In Progress: 0, Next Today: 0, Next This Week: 0, Next Later: 1, Blocked: 0)
-Done tasks: 6
+Open tasks: 0 (In Progress: 0, Next Today: 0, Next This Week: 0, Next Later: 0, Blocked: 0)
+Done tasks: 7
 
 ## In Progress
 
@@ -12,6 +12,10 @@ Done tasks: 6
 ## Next – This Week
 
 ## Next – Later
+
+## Blocked
+
+## Done
 
 ### T-007 [A11Y] Add selection and optional scrollback support
 Outcome:
@@ -29,10 +33,6 @@ Touches: alacritty/src/accessibility/, alacritty/src/display/, scripts/accessibi
 Deps: T-004, T-005, T-006
 Verify: unit-test, cli-proof, manual
 Notes: Source plan Slice 7. This is a follow-up after visible viewport reading and mouse hit testing are stable.
-
-## Blocked
-
-## Done
 
 ### T-006 [A11Y] Throttle UIA text and caret events
 Outcome:

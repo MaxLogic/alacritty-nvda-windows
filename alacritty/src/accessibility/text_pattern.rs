@@ -14,7 +14,7 @@ use windows_sys::Win32::System::Ole::{
 };
 use windows_sys::Win32::System::Variant::{VariantInit, VARENUM, VARIANT, VT_EMPTY, VT_UNKNOWN};
 use windows_sys::Win32::UI::Accessibility::{
-    SupportedTextSelection, SupportedTextSelection_None, TextPatternRangeEndpoint,
+    SupportedTextSelection, SupportedTextSelection_Multiple, TextPatternRangeEndpoint,
     TextPatternRangeEndpoint_Start, TextUnit, TextUnit_Character, TextUnit_Document, TextUnit_Line,
     TextUnit_Word, UiaPoint, UIA_TEXTATTRIBUTE_ID,
 };
@@ -45,15 +45,20 @@ struct TextProviderState {
     text: String,
     terminal: Option<VisibleTerminalSnapshot>,
     layout: Option<TextProviderLayout>,
+    selection: Vec<(usize, usize)>,
 }
 
 impl TextProviderState {
     fn from_text(text: String) -> Self {
-        Self { text, terminal: None, layout: None }
+        Self { text, terminal: None, layout: None, selection: Vec::new() }
     }
 
-    fn from_terminal(snapshot: VisibleTerminalSnapshot, layout: Option<TextProviderLayout>) -> Self {
-        Self { text: snapshot.text().to_owned(), terminal: Some(snapshot), layout }
+    fn from_terminal(
+        snapshot: VisibleTerminalSnapshot,
+        layout: Option<TextProviderLayout>,
+        selection: Vec<(usize, usize)>,
+    ) -> Self {
+        Self { text: snapshot.text().to_owned(), terminal: Some(snapshot), layout, selection }
     }
 
     fn offset_for_point(&self, row: usize, column: usize) -> usize {
@@ -132,9 +137,10 @@ impl RawTextProvider {
         &self,
         snapshot: VisibleTerminalSnapshot,
         layout: Option<TextProviderLayout>,
+        selection: Vec<(usize, usize)>,
     ) {
         *self.state.write().expect("text provider lock poisoned") =
-            TextProviderState::from_terminal(snapshot, layout);
+            TextProviderState::from_terminal(snapshot, layout, selection);
     }
 
     #[cfg(test)]
@@ -159,7 +165,20 @@ impl RawTextProvider {
                 columns,
                 rows,
             )),
+            Vec::new(),
         );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_selection(&self, start: usize, end: usize) {
+        let mut state = self.state.write().expect("text provider lock poisoned");
+        state.selection = vec![(start, end)];
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_selections(&self, ranges: Vec<(usize, usize)>) {
+        let mut state = self.state.write().expect("text provider lock poisoned");
+        state.selection = ranges;
     }
 
     pub(crate) fn disconnect_enclosing_provider(&mut self) {
@@ -168,6 +187,11 @@ impl RawTextProvider {
 
     fn text(&self) -> String {
         self.state.read().expect("text provider lock poisoned").text.clone()
+    }
+
+    fn text_and_selection(&self) -> (String, Vec<(usize, usize)>) {
+        let state = self.state.read().expect("text provider lock poisoned");
+        (state.text.clone(), state.selection.clone())
     }
 
     fn range_from_point(&self, point: UiaPoint) -> (String, usize) {
@@ -187,7 +211,8 @@ pub(crate) struct RawTextProviderVtable {
         unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
     pub(crate) add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
     pub(crate) release: unsafe extern "system" fn(*mut c_void) -> u32,
-    get_selection: unsafe extern "system" fn(*mut c_void, *mut *mut SAFEARRAY) -> HRESULT,
+    pub(crate) get_selection:
+        unsafe extern "system" fn(*mut c_void, *mut *mut SAFEARRAY) -> HRESULT,
     get_visible_ranges: unsafe extern "system" fn(*mut c_void, *mut *mut SAFEARRAY) -> HRESULT,
     range_from_child:
         unsafe extern "system" fn(*mut c_void, *mut c_void, *mut *mut c_void) -> HRESULT,
@@ -252,14 +277,49 @@ pub(crate) unsafe extern "system" fn text_provider_release(this: *mut c_void) ->
 }
 
 unsafe extern "system" fn text_provider_get_selection(
-    _this: *mut c_void,
+    this: *mut c_void,
     ranges: *mut *mut SAFEARRAY,
 ) -> HRESULT {
     if ranges.is_null() {
         return E_POINTER;
     }
 
-    unsafe { *ranges = empty_unknown_safearray() };
+    unsafe { *ranges = ptr::null_mut() };
+    let provider = unsafe { &*(this as *const RawTextProvider) };
+    let (text, selection) = provider.text_and_selection();
+    if selection.is_empty() {
+        unsafe { *ranges = empty_unknown_safearray() };
+        return S_OK;
+    }
+
+    let array = unsafe { SafeArrayCreateVector(VT_UNKNOWN, 0, selection.len() as u32) };
+    if array.is_null() {
+        return E_FAIL;
+    }
+    let _ = unsafe { SafeArraySetIID(array, &IID_IUNKNOWN) };
+
+    for (index, (start, end)) in selection.into_iter().enumerate() {
+        let range = RawTextRange::allocate(
+            text.clone(),
+            clamp_to_boundary(&text, start),
+            clamp_to_boundary(&text, end),
+            provider.enclosing_provider,
+        );
+        let index = index as i32;
+        if unsafe { SafeArrayPutElement(array, &index, range.as_ptr().cast::<c_void>()) } != S_OK {
+            unsafe {
+                text_range_release(range.as_ptr().cast());
+                SafeArrayDestroy(array);
+            }
+            return E_FAIL;
+        }
+        unsafe {
+            text_range_release(range.as_ptr().cast());
+        }
+    }
+
+    unsafe { *ranges = array };
+
     S_OK
 }
 
@@ -342,7 +402,7 @@ unsafe extern "system" fn text_provider_supported_text_selection(
         return E_POINTER;
     }
 
-    unsafe { *selection = SupportedTextSelection_None };
+    unsafe { *selection = SupportedTextSelection_Multiple };
     S_OK
 }
 
@@ -1023,7 +1083,7 @@ mod tests {
     use windows_sys::core::BSTR;
     use windows_sys::Win32::Foundation::{SysFreeString, SysStringLen};
     use windows_sys::Win32::System::Ole::{SafeArrayDestroy, SafeArrayGetElement};
-    use windows_sys::Win32::UI::Accessibility::SupportedTextSelection_None;
+    use windows_sys::Win32::UI::Accessibility::SupportedTextSelection_Multiple;
 
     use super::RawTextProvider;
 
@@ -1056,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn text_provider_reports_no_selection_until_selection_support_exists() {
+    fn text_provider_reports_single_selection_support() {
         let provider = RawTextProvider::allocate("text".to_owned());
         let raw_provider = provider.as_ptr().cast();
         let vtable = unsafe { (*provider.as_ptr()).vtable };
@@ -1064,7 +1124,7 @@ mod tests {
         unsafe {
             let mut selection = 1;
             assert_eq!((vtable.supported_text_selection)(raw_provider, &mut selection), 0);
-            assert_eq!(selection, SupportedTextSelection_None);
+            assert_eq!(selection, SupportedTextSelection_Multiple);
             (vtable.release)(raw_provider);
         }
     }
