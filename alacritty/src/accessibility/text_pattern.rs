@@ -30,6 +30,7 @@ const E_NOTIMPL: HRESULT = 0x8000_4001u32 as i32;
 const E_POINTER: HRESULT = 0x8000_4003u32 as i32;
 const IID_IUNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
 const IID_ITEXT_PROVIDER: GUID = GUID::from_u128(0x3589c92c_63f3_4367_99bb_ada653b77cf2);
+const IID_ITEXT_PROVIDER2: GUID = GUID::from_u128(0x0dc5e6ed_3e16_4bf1_8f9a_a979878bc195);
 const IID_ITEXT_RANGE_PROVIDER: GUID = GUID::from_u128(0x5347ad7b_c355_46f8_aff5_909033582f63);
 
 fn trace_uia(message: &str) {
@@ -85,6 +86,14 @@ impl TextProviderState {
         }
 
         offset_for_line_column(&self.text, row, column)
+    }
+
+    fn cursor_offset(&self) -> usize {
+        let Some(snapshot) = &self.terminal else {
+            return self.text.len();
+        };
+
+        snapshot.offset_for_point(snapshot.cursor()).unwrap_or(self.text.len())
     }
 }
 
@@ -216,6 +225,15 @@ impl RawTextProvider {
 
         (state.text, offset)
     }
+
+    pub(crate) fn caret_range(&self) -> *mut c_void {
+        let state = self.state.read().expect("text provider lock poisoned");
+        let offset = state.cursor_offset();
+        trace_uia(&format!("text_provider.GetCaretRange offset={offset}"));
+        RawTextRange::allocate(state.text.clone(), offset, offset, self.enclosing_provider)
+            .as_ptr()
+            .cast()
+    }
 }
 
 #[repr(C)]
@@ -234,6 +252,10 @@ pub(crate) struct RawTextProviderVtable {
     pub(crate) document_range: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
     pub(crate) supported_text_selection:
         unsafe extern "system" fn(*mut c_void, *mut SupportedTextSelection) -> HRESULT,
+    range_from_annotation:
+        unsafe extern "system" fn(*mut c_void, *mut c_void, *mut *mut c_void) -> HRESULT,
+    pub(crate) get_caret_range:
+        unsafe extern "system" fn(*mut c_void, *mut BOOL, *mut *mut c_void) -> HRESULT,
 }
 
 static RAW_TEXT_PROVIDER_VTABLE: RawTextProviderVtable = RawTextProviderVtable {
@@ -246,6 +268,8 @@ static RAW_TEXT_PROVIDER_VTABLE: RawTextProviderVtable = RawTextProviderVtable {
     range_from_point: text_provider_range_from_point,
     document_range: text_provider_document_range,
     supported_text_selection: text_provider_supported_text_selection,
+    range_from_annotation: text_provider_range_from_annotation,
+    get_caret_range: text_provider_get_caret_range,
 };
 
 unsafe extern "system" fn text_provider_query_interface(
@@ -261,6 +285,11 @@ unsafe extern "system" fn text_provider_query_interface(
         *interface = ptr::null_mut();
         if guid_eq(&*iid, &IID_IUNKNOWN) || guid_eq(&*iid, &IID_ITEXT_PROVIDER) {
             trace_uia("text_provider.QueryInterface ITextProvider");
+            text_provider_add_ref(this);
+            *interface = this;
+            S_OK
+        } else if guid_eq(&*iid, &IID_ITEXT_PROVIDER2) {
+            trace_uia("text_provider.QueryInterface ITextProvider2");
             text_provider_add_ref(this);
             *interface = this;
             S_OK
@@ -418,6 +447,36 @@ unsafe extern "system" fn text_provider_supported_text_selection(
 
     unsafe { *selection = SupportedTextSelection_Multiple };
     trace_uia("text_provider.SupportedTextSelection multiple");
+    S_OK
+}
+
+unsafe extern "system" fn text_provider_range_from_annotation(
+    _this: *mut c_void,
+    _annotation: *mut c_void,
+    range: *mut *mut c_void,
+) -> HRESULT {
+    if range.is_null() {
+        return E_POINTER;
+    }
+
+    unsafe { *range = ptr::null_mut() };
+    E_INVALIDARG
+}
+
+unsafe extern "system" fn text_provider_get_caret_range(
+    this: *mut c_void,
+    is_active: *mut BOOL,
+    range: *mut *mut c_void,
+) -> HRESULT {
+    if is_active.is_null() || range.is_null() {
+        return E_POINTER;
+    }
+
+    let provider = unsafe { &*(this as *const RawTextProvider) };
+    unsafe {
+        *is_active = 1;
+        *range = provider.caret_range();
+    }
     S_OK
 }
 
@@ -592,6 +651,10 @@ pub(crate) unsafe extern "system" fn text_range_release(this: *mut c_void) -> u3
     }
 
     remaining
+}
+
+pub(crate) unsafe fn release_text_range(range: *mut c_void) -> u32 {
+    if range.is_null() { 0 } else { unsafe { text_range_release(range) } }
 }
 
 unsafe extern "system" fn text_range_clone(this: *mut c_void, range: *mut *mut c_void) -> HRESULT {
@@ -1115,7 +1178,7 @@ mod tests {
     use windows_sys::Win32::UI::Accessibility::SupportedTextSelection_Multiple;
     use windows_sys::core::BSTR;
 
-    use super::RawTextProvider;
+    use super::{IID_ITEXT_PROVIDER2, RawTextProvider};
 
     #[test]
     fn document_range_get_text_returns_visible_text() {
@@ -1155,6 +1218,49 @@ mod tests {
             let mut selection = 1;
             assert_eq!((vtable.supported_text_selection)(raw_provider, &mut selection), 0);
             assert_eq!(selection, SupportedTextSelection_Multiple);
+            (vtable.release)(raw_provider);
+        }
+    }
+
+    #[test]
+    fn text_provider_supports_text_pattern2_query_interface() {
+        let provider = RawTextProvider::allocate("text".to_owned());
+        let raw_provider = provider.as_ptr().cast();
+        let vtable = unsafe { (*provider.as_ptr()).vtable };
+
+        unsafe {
+            let mut text_provider2 = std::ptr::null_mut();
+            assert_eq!(
+                (vtable.query_interface)(raw_provider, &IID_ITEXT_PROVIDER2, &mut text_provider2),
+                0,
+            );
+            assert_eq!(text_provider2, raw_provider);
+
+            (vtable.release)(text_provider2);
+            (vtable.release)(raw_provider);
+        }
+    }
+
+    #[test]
+    fn text_provider2_get_caret_range_returns_collapsed_active_range() {
+        let provider = RawTextProvider::allocate("alpha beta".to_owned());
+        let raw_provider = provider.as_ptr().cast();
+        let vtable = unsafe { (*provider.as_ptr()).vtable };
+
+        unsafe {
+            let mut is_active = 0;
+            let mut range = std::ptr::null_mut();
+            assert_eq!((vtable.get_caret_range)(raw_provider, &mut is_active, &mut range), 0);
+            assert_eq!(is_active, 1);
+            assert!(!range.is_null());
+
+            let range_vtable = *(range as *mut &'static super::RawTextRangeVtable);
+            let mut text: BSTR = std::ptr::null_mut();
+            assert_eq!((range_vtable.get_text)(range, -1, &mut text), 0);
+            assert_eq!(SysStringLen(text), 0);
+
+            SysFreeString(text);
+            (range_vtable.release)(range);
             (vtable.release)(raw_provider);
         }
     }
