@@ -104,6 +104,7 @@ mod tests {
                     3,
                 ),
                 None,
+                Vec::new(),
             );
 
             let mut range = std::ptr::null_mut();

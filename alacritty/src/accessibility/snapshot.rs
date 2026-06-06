@@ -3,7 +3,7 @@
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::Term;
+use alacritty_terminal::term::{point_to_viewport, Term};
 
 /// Immutable snapshot of the terminal's visible text.
 #[derive(Clone, Debug)]
@@ -125,6 +125,58 @@ impl VisibleTerminalSnapshot {
 
         Some(Point::new(row_index, Column(column)))
     }
+
+    /// Convert the terminal's active visible selection to byte offsets into [`Self::text`].
+    pub fn selection_offsets<T>(&self, term: &Term<T>) -> Vec<(usize, usize)> {
+        let Some(selection) = term.selection.as_ref().and_then(|selection| selection.to_range(term))
+        else {
+            return Vec::new();
+        };
+        let display_offset = term.grid().display_offset();
+
+        if selection.is_block {
+            let start_column = selection.start.column.0.min(selection.end.column.0);
+            let end_column = selection.start.column.0.max(selection.end.column.0);
+            return (selection.start.line.0..=selection.end.line.0)
+                .filter_map(|line| {
+                    let row = point_to_viewport(display_offset, Point::new(Line(line), Column(0)))?;
+                    let start = self.offset_for_point(Point::new(row.line, Column(start_column)))?;
+                    let end =
+                        self.offset_for_point(Point::new(row.line, Column(end_column + 1)))?;
+                    (start < end).then_some((start, end))
+                })
+                .collect();
+        }
+
+        let visible_top = -(display_offset as i32);
+        let visible_bottom = visible_top + self.rows.len().saturating_sub(1) as i32;
+        if selection.end.line.0 < visible_top || selection.start.line.0 > visible_bottom {
+            return Vec::new();
+        }
+
+        let start_line = selection.start.line.0.max(visible_top);
+        let end_line = selection.end.line.0.min(visible_bottom);
+        let start_column = if selection.start.line.0 < visible_top {
+            Column(0)
+        } else {
+            selection.start.column
+        };
+        let end_column = if selection.end.line.0 > visible_bottom {
+            Column(self.columns)
+        } else {
+            Column((selection.end.column.0 + 1).min(self.columns))
+        };
+
+        let start = point_to_viewport(display_offset, Point::new(Line(start_line), start_column))
+            .and_then(|point| self.offset_for_point(point));
+        let end = point_to_viewport(display_offset, Point::new(Line(end_line), end_column))
+            .and_then(|point| self.offset_for_point(point));
+
+        match (start, end) {
+            (Some(start), Some(end)) if start < end => vec![(start, end)],
+            _ => Vec::new(),
+        }
+    }
 }
 
 impl SnapshotRow {
@@ -174,6 +226,8 @@ impl SnapshotRow {
 mod tests {
     use alacritty_terminal::grid::Dimensions;
     use alacritty_terminal::index::{Column, Line, Point};
+    use alacritty_terminal::index::Side;
+    use alacritty_terminal::selection::{Selection, SelectionType};
     use alacritty_terminal::term::cell::Flags;
     use alacritty_terminal::term::test::TermSize;
     use alacritty_terminal::term::{Config, Term};
@@ -268,5 +322,19 @@ mod tests {
         assert_eq!(snapshot.offset_for_point(Point::new(0, Column(0))), Some(0));
         assert_eq!(snapshot.offset_for_point(Point::new(0, Column(1))), Some("e\u{301}".len()));
         assert_eq!(snapshot.point_for_offset("e\u{301}".len()), Some(Point::new(0, Column(1))));
+    }
+
+    #[test]
+    fn snapshot_clips_selection_to_visible_text() {
+        let mut term = term(4, 2);
+        term.grid_mut()[Line(0)][Column(0)].c = 'a';
+        term.grid_mut()[Line(0)][Column(1)].c = 'b';
+        term.selection =
+            Some(Selection::new(SelectionType::Simple, Point::new(Line(-1), Column(0)), Side::Left));
+        term.selection.as_mut().unwrap().update(Point::new(Line(0), Column(1)), Side::Right);
+
+        let snapshot = VisibleTerminalSnapshot::from_term(&term);
+
+        assert_eq!(snapshot.selection_offsets(&term), vec![(0, 2)]);
     }
 }
