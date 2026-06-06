@@ -46,10 +46,10 @@ use alacritty_terminal::index::Point;
 use alacritty_terminal::term::Term;
 
 #[cfg(windows)]
-use crate::accessibility::windows_provider::{hwnd_from_raw_window_handle, WindowsAccessibility};
+use crate::accessibility::windows_provider::{WindowsAccessibility, hwnd_from_raw_window_handle};
 use crate::cli::WindowOptions;
-use crate::config::window::{Decorations, Identity, WindowConfig};
 use crate::config::UiConfig;
+use crate::config::window::{Decorations, Identity, WindowConfig};
 use crate::display::SizeInfo;
 
 /// Window icon for `_NET_WM_ICON` property.

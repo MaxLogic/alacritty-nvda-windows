@@ -3,33 +3,32 @@
 use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::Term;
-use windows_sys::core::{BSTR, GUID, HRESULT};
 use windows_sys::Win32::Foundation::{
     HWND, LPARAM, LRESULT, POINT, RECT, S_OK, VARIANT_TRUE, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::Com::SAFEARRAY;
 use windows_sys::Win32::System::Variant::{
-    VariantInit, VARENUM, VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4,
+    VARENUM, VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4, VariantInit,
 };
 use windows_sys::Win32::UI::Accessibility::{
     ProviderOptions, ProviderOptions_ServerSideProvider, UIA_ControlTypePropertyId,
-    UIA_ActiveTextPositionChangedEventId, UIA_IsContentElementPropertyId,
-    UIA_IsControlElementPropertyId, UIA_IsKeyboardFocusablePropertyId,
-    UIA_IsTextPatternAvailablePropertyId, UIA_NamePropertyId, UIA_TextControlTypeId,
-    UIA_TextPatternId, UIA_Text_TextChangedEventId, UiaClientsAreListening,
-    UiaDisconnectProvider, UiaHostProviderFromHwnd, UiaRaiseAutomationEvent,
-    UiaReturnRawElementProvider, UiaRootObjectId, UIA_PROPERTY_ID,
+    UIA_IsContentElementPropertyId, UIA_IsControlElementPropertyId,
+    UIA_IsKeyboardFocusablePropertyId, UIA_IsTextPatternAvailablePropertyId, UIA_NamePropertyId,
+    UIA_PROPERTY_ID, UIA_Text_TextChangedEventId, UIA_Text_TextSelectionChangedEventId,
+    UIA_TextControlTypeId, UIA_TextPatternId, UiaClientsAreListening, UiaDisconnectProvider,
+    UiaHostProviderFromHwnd, UiaRaiseAutomationEvent, UiaReturnRawElementProvider, UiaRootObjectId,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, OBJID_CLIENT, WM_GETOBJECT};
+use windows_sys::core::{BSTR, GUID, HRESULT};
 use winit::raw_window_handle::RawWindowHandle;
 
 use crate::accessibility::snapshot::VisibleTerminalSnapshot;
@@ -46,6 +45,17 @@ const IID_IRAW_ELEMENT_PROVIDER_SIMPLE: GUID =
 const SUBCLASS_ID: usize = 1;
 const UIA_EVENT_THROTTLE: Duration = Duration::from_millis(75);
 
+fn trace_uia(message: &str) {
+    if let Ok(path) = std::env::var("ALACRITTY_UIA_DEBUG_TRACE") {
+        let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(
+            |mut file| {
+                use std::io::Write;
+                writeln!(file, "{message}")
+            },
+        );
+    }
+}
+
 pub(crate) trait UiaEventSink {
     fn clients_are_listening(&self) -> bool;
 
@@ -60,22 +70,20 @@ pub(crate) struct NativeUiaEventSink {
 impl UiaEventSink for NativeUiaEventSink {
     fn clients_are_listening(&self) -> bool {
         unsafe {
-            UiaClientsAreListening() != 0
-                || (*self.provider.as_ptr()).has_advised_event_listeners()
+            UiaClientsAreListening() != 0 || (*self.provider.as_ptr()).has_advised_event_listeners()
         }
     }
 
     fn raise_event(&mut self, provider: *mut c_void, event_id: i32) {
+        trace_uia(&format!("raise_event {event_id}"));
         let _ = unsafe { UiaRaiseAutomationEvent(provider, event_id) };
         if let Ok(path) = std::env::var("ALACRITTY_UIA_EVENT_TRACE") {
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .and_then(|mut file| {
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(
+                |mut file| {
                     use std::io::Write;
                     writeln!(file, "{event_id}")
-                });
+                },
+            );
         }
     }
 }
@@ -84,6 +92,7 @@ impl UiaEventSink for NativeUiaEventSink {
 struct PublishedSnapshotState {
     text: String,
     cursor: Point<usize>,
+    selection: Vec<(usize, usize)>,
 }
 
 #[derive(Debug)]
@@ -92,7 +101,7 @@ pub(crate) struct UiaEventThrottle {
     last_emit: Instant,
     has_emitted: bool,
     pending_text: bool,
-    pending_caret: bool,
+    pending_selection: bool,
 }
 
 impl UiaEventThrottle {
@@ -102,13 +111,13 @@ impl UiaEventThrottle {
             last_emit: now,
             has_emitted: false,
             pending_text: false,
-            pending_caret: false,
+            pending_selection: false,
         }
     }
 
-    pub(crate) fn record_snapshot_change(&mut self, text_changed: bool, caret_changed: bool) {
+    pub(crate) fn record_snapshot_change(&mut self, text_changed: bool, selection_changed: bool) {
         self.pending_text |= text_changed;
-        self.pending_caret |= caret_changed;
+        self.pending_selection |= selection_changed;
     }
 
     pub(crate) fn flush_due<S: UiaEventSink>(
@@ -117,13 +126,13 @@ impl UiaEventThrottle {
         now: Instant,
         sink: &mut S,
     ) {
-        if !self.pending_text && !self.pending_caret {
+        if !self.pending_text && !self.pending_selection {
             return;
         }
 
         if !sink.clients_are_listening() {
             self.pending_text = false;
-            self.pending_caret = false;
+            self.pending_selection = false;
             self.last_emit = now;
             return;
         }
@@ -135,12 +144,12 @@ impl UiaEventThrottle {
         if self.pending_text {
             sink.raise_event(provider, UIA_Text_TextChangedEventId);
         }
-        if self.pending_caret {
-            sink.raise_event(provider, UIA_ActiveTextPositionChangedEventId);
+        if self.pending_selection {
+            sink.raise_event(provider, UIA_Text_TextSelectionChangedEventId);
         }
 
         self.pending_text = false;
-        self.pending_caret = false;
+        self.pending_selection = false;
         self.last_emit = now;
         self.has_emitted = true;
     }
@@ -237,7 +246,10 @@ impl WindowsAccessibility {
                 hwnd,
                 provider,
                 last_snapshot: Mutex::new(None),
-                event_throttle: Mutex::new(UiaEventThrottle::new(UIA_EVENT_THROTTLE, Instant::now())),
+                event_throttle: Mutex::new(UiaEventThrottle::new(
+                    UIA_EVENT_THROTTLE,
+                    Instant::now(),
+                )),
             })
         }
     }
@@ -250,28 +262,34 @@ impl WindowsAccessibility {
         let snapshot = VisibleTerminalSnapshot::from_term(term);
         let layout = self.layout_for_snapshot(&snapshot, size_info);
         let selection = snapshot.selection_offsets(term);
-        let (text_changed, caret_changed) =
-            self.snapshot_changes(snapshot.text().to_owned(), snapshot.cursor());
+        let (text_changed, selection_changed) =
+            self.snapshot_changes(snapshot.text().to_owned(), snapshot.cursor(), selection.clone());
         unsafe {
             let provider = &*self.provider.as_ptr();
             provider.set_terminal_state(snapshot, layout, selection);
         }
-        self.record_and_flush_events(text_changed, caret_changed);
+        self.record_and_flush_events(text_changed, selection_changed);
     }
 
-    fn snapshot_changes(&self, text: String, cursor: Point<usize>) -> (bool, bool) {
-        let mut last_snapshot = self.last_snapshot.lock().expect("accessibility state lock poisoned");
-        let text_changed =
-            last_snapshot.as_ref().is_none_or(|snapshot| snapshot.text != text);
-        let caret_changed =
-            last_snapshot.as_ref().is_none_or(|snapshot| snapshot.cursor != cursor);
-        *last_snapshot = Some(PublishedSnapshotState { text, cursor });
-        (text_changed, caret_changed)
+    fn snapshot_changes(
+        &self,
+        text: String,
+        cursor: Point<usize>,
+        selection: Vec<(usize, usize)>,
+    ) -> (bool, bool) {
+        let mut last_snapshot =
+            self.last_snapshot.lock().expect("accessibility state lock poisoned");
+        let text_changed = last_snapshot.as_ref().is_none_or(|snapshot| snapshot.text != text);
+        let selection_changed = last_snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.cursor != cursor || snapshot.selection != selection);
+        *last_snapshot = Some(PublishedSnapshotState { text, cursor, selection });
+        (text_changed, selection_changed)
     }
 
-    fn record_and_flush_events(&self, text_changed: bool, caret_changed: bool) {
+    fn record_and_flush_events(&self, text_changed: bool, selection_changed: bool) {
         let mut throttle = self.event_throttle.lock().expect("event throttle lock poisoned");
-        throttle.record_snapshot_change(text_changed, caret_changed);
+        throttle.record_snapshot_change(text_changed, selection_changed);
         let mut sink = NativeUiaEventSink { provider: self.provider };
         throttle.flush_due(self.raw_provider(), Instant::now(), &mut sink);
     }
@@ -555,10 +573,12 @@ unsafe extern "system" fn query_interface(
     unsafe {
         *interface = ptr::null_mut();
         if guid_eq(&*iid, &IID_IUNKNOWN) || guid_eq(&*iid, &IID_IRAW_ELEMENT_PROVIDER_SIMPLE) {
+            trace_uia("provider.QueryInterface IRawElementProviderSimple");
             add_ref(this);
             *interface = this;
             S_OK
         } else if guid_eq(&*iid, &IID_IRAW_ELEMENT_PROVIDER_ADVISE_EVENTS) {
+            trace_uia("provider.QueryInterface IRawElementProviderAdviseEvents");
             let provider = &*(this as *const RawProvider);
             add_ref(this);
             *interface = provider.advise_events.as_raw();
@@ -613,19 +633,11 @@ unsafe extern "system" fn advise_events_release(this: *mut c_void) -> u32 {
 }
 
 pub(crate) unsafe fn add_ref_raw_provider(provider: *mut c_void) -> u32 {
-    if provider.is_null() {
-        0
-    } else {
-        unsafe { add_ref(provider) }
-    }
+    if provider.is_null() { 0 } else { unsafe { add_ref(provider) } }
 }
 
 pub(crate) unsafe fn release_raw_provider(provider: *mut c_void) -> u32 {
-    if provider.is_null() {
-        0
-    } else {
-        unsafe { release(provider) }
-    }
+    if provider.is_null() { 0 } else { unsafe { release(provider) } }
 }
 
 unsafe extern "system" fn provider_options(
@@ -640,6 +652,7 @@ unsafe extern "system" fn provider_options(
     unsafe {
         *options = provider.provider.provider_options();
     }
+    trace_uia("provider.ProviderOptions");
     S_OK
 }
 
@@ -655,10 +668,12 @@ unsafe extern "system" fn get_pattern_provider(
     let provider = unsafe { &*(this as *const RawProvider) };
     unsafe {
         if pattern_id == UIA_TextPatternId {
+            trace_uia("provider.GetPatternProvider TextPattern");
             let text_provider = provider.text_provider.as_ptr().cast();
             ((*provider.text_provider.as_ptr()).vtable.add_ref)(text_provider);
             *pattern_provider = text_provider;
         } else {
+            trace_uia(&format!("provider.GetPatternProvider unsupported {pattern_id}"));
             *pattern_provider = ptr::null_mut();
         }
     }
@@ -680,14 +695,19 @@ unsafe extern "system" fn get_property_value(
         let variant = &mut (*value).Anonymous.Anonymous;
 
         if let Some(property_value) = provider.provider.property_i4(property_id) {
+            trace_uia(&format!("provider.GetPropertyValue {property_id} VT_I4"));
             variant.vt = VT_I4;
             variant.Anonymous.lVal = property_value;
         } else if let Some(property_value) = provider.provider.property_bstr(property_id) {
+            trace_uia(&format!("provider.GetPropertyValue {property_id} VT_BSTR"));
             variant.vt = VT_BSTR;
             variant.Anonymous.bstrVal = string_to_bstr(&property_value);
         } else if let Some(property_value) = provider.provider.property_bool(property_id) {
+            trace_uia(&format!("provider.GetPropertyValue {property_id} VT_BOOL"));
             variant.vt = VT_BOOL;
             variant.Anonymous.boolVal = if property_value { VARIANT_TRUE } else { 0 };
+        } else {
+            trace_uia(&format!("provider.GetPropertyValue {property_id} VT_EMPTY"));
         }
     }
 
@@ -703,6 +723,7 @@ unsafe extern "system" fn host_raw_element_provider(
     }
 
     let raw_provider = unsafe { &*(this as *const RawProvider) };
+    trace_uia("provider.HostRawElementProvider");
     unsafe { UiaHostProviderFromHwnd(raw_provider.hwnd, provider) }
 }
 
@@ -717,6 +738,7 @@ unsafe extern "system" fn advise_event_added(
 
     let advise_events = unsafe { &*(this as *const RawProviderAdviseEvents) };
     if !advise_events.owner.is_null() {
+        trace_uia(&format!("provider.AdviseEventAdded {_event_id}"));
         let provider = unsafe { &*(advise_events.owner as *const RawProvider) };
         provider.advise_event_added();
     }
@@ -735,6 +757,7 @@ unsafe extern "system" fn advise_event_removed(
 
     let advise_events = unsafe { &*(this as *const RawProviderAdviseEvents) };
     if !advise_events.owner.is_null() {
+        trace_uia(&format!("provider.AdviseEventRemoved {_event_id}"));
         let provider = unsafe { &*(advise_events.owner as *const RawProvider) };
         provider.advise_event_removed();
     }
@@ -761,7 +784,7 @@ mod tests {
     use winit::raw_window_handle::{RawWindowHandle, Win32WindowHandle};
 
     use windows_sys::Win32::Foundation::VARIANT_TRUE;
-    use windows_sys::Win32::System::Variant::{VariantClear, VT_BOOL, VT_BSTR, VT_I4};
+    use windows_sys::Win32::System::Variant::{VT_BOOL, VT_BSTR, VT_I4, VariantClear};
     use windows_sys::Win32::UI::Accessibility::{
         ProviderOptions_ServerSideProvider, UIA_ControlTypePropertyId,
         UIA_IsContentElementPropertyId, UIA_IsControlElementPropertyId,
@@ -771,8 +794,8 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{OBJID_CLIENT, WM_GETOBJECT};
 
     use super::{
-        hwnd_from_raw_window_handle, release, should_handle_wm_getobject, RawProvider,
-        TerminalProvider,
+        RawProvider, TerminalProvider, hwnd_from_raw_window_handle, release,
+        should_handle_wm_getobject,
     };
 
     #[test]
@@ -916,7 +939,11 @@ mod tests {
         unsafe {
             let mut pattern_provider = std::ptr::null_mut();
             assert_eq!(
-                (vtable.get_pattern_provider)(raw_provider, UIA_TextPatternId, &mut pattern_provider),
+                (vtable.get_pattern_provider)(
+                    raw_provider,
+                    UIA_TextPatternId,
+                    &mut pattern_provider
+                ),
                 0,
             );
 
@@ -926,8 +953,7 @@ mod tests {
             let mut range = std::ptr::null_mut();
             assert_eq!((text_vtable.document_range)(pattern_provider, &mut range), 0);
 
-            let range_provider =
-                range as *mut crate::accessibility::text_pattern::RawTextRange;
+            let range_provider = range as *mut crate::accessibility::text_pattern::RawTextRange;
             let range_vtable = (*range_provider).vtable;
             let mut enclosing = std::ptr::null_mut();
             assert_eq!((range_vtable.get_enclosing_element)(range, &mut enclosing), 0);
@@ -958,7 +984,11 @@ mod tests {
         unsafe {
             let mut pattern_provider = std::ptr::null_mut();
             assert_eq!(
-                (vtable.get_pattern_provider)(raw_provider, UIA_TextPatternId, &mut pattern_provider),
+                (vtable.get_pattern_provider)(
+                    raw_provider,
+                    UIA_TextPatternId,
+                    &mut pattern_provider
+                ),
                 0,
             );
 
@@ -971,8 +1001,7 @@ mod tests {
             let mut range = std::ptr::null_mut();
             assert_eq!((text_vtable.document_range)(pattern_provider, &mut range), 0);
 
-            let range_provider =
-                range as *mut crate::accessibility::text_pattern::RawTextRange;
+            let range_provider = range as *mut crate::accessibility::text_pattern::RawTextRange;
             let range_vtable = (*range_provider).vtable;
             let mut enclosing = std::ptr::null_mut();
             assert_eq!((range_vtable.get_enclosing_element)(range, &mut enclosing), 0);
