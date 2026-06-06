@@ -50,20 +50,27 @@ if ($rect.IsEmpty -or $rect.Width -le 0 -or $rect.Height -le 0) {
     Write-Error "Window bounding rectangle is empty."
 }
 
-$point = [System.Windows.Point]::new(
-    $rect.Left + ($rect.Width / 2.0),
-    $rect.Top + ($rect.Height / 2.0)
-)
+$x = $rect.Left + [Math]::Min(140.0, [Math]::Max(1.0, $rect.Width / 2.0))
+$maxY = [Math]::Min($rect.Height - 1.0, 260.0)
+$line = $null
 
-$range = $pattern.RangeFromPoint($point)
-if ($null -eq $range) {
-    Write-Error "RangeFromPoint returned null."
+for ($yOffset = 20.0; $yOffset -le $maxY; $yOffset += 15.0) {
+    $point = [System.Windows.Point]::new($x, $rect.Top + $yOffset)
+    $range = $pattern.RangeFromPoint($point)
+    if ($null -eq $range) {
+        continue
+    }
+
+    $range.ExpandToEnclosingUnit([System.Windows.Automation.Text.TextUnit]::Line)
+    $candidate = $range.GetText(-1)
+    if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+        $line = $candidate
+        break
+    }
 }
 
-$range.ExpandToEnclosingUnit([System.Windows.Automation.Text.TextUnit]::Line)
-$line = $range.GetText(-1)
 if ([string]::IsNullOrWhiteSpace($line)) {
-    Write-Error "RangeFromPoint line read returned no text."
+    Write-Error "RangeFromPoint did not return readable text for any sampled viewport row."
 }
 
 Write-Output "RangeFromPoint line read: PASS"

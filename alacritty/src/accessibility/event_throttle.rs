@@ -6,7 +6,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use windows_sys::Win32::UI::Accessibility::{
-        UIA_ActiveTextPositionChangedEventId, UIA_Text_TextChangedEventId,
+        UIA_Text_TextChangedEventId, UIA_Text_TextSelectionChangedEventId,
     };
 
     use crate::accessibility::windows_provider::{UiaEventSink, UiaEventThrottle};
@@ -47,10 +47,10 @@ mod tests {
 
         throttle.record_snapshot_change(true, true);
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(30), &mut sink);
-        assert_eq!(
-            sink.events,
-            [UIA_Text_TextChangedEventId, UIA_ActiveTextPositionChangedEventId]
-        );
+        assert_eq!(sink.events, [
+            UIA_Text_TextChangedEventId,
+            UIA_Text_TextSelectionChangedEventId
+        ]);
 
         throttle.record_snapshot_change(true, true);
         throttle.record_snapshot_change(true, true);
@@ -58,15 +58,12 @@ mod tests {
         assert_eq!(sink.events.len(), 2);
 
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(105), &mut sink);
-        assert_eq!(
-            sink.events,
-            [
-                UIA_Text_TextChangedEventId,
-                UIA_ActiveTextPositionChangedEventId,
-                UIA_Text_TextChangedEventId,
-                UIA_ActiveTextPositionChangedEventId,
-            ]
-        );
+        assert_eq!(sink.events, [
+            UIA_Text_TextChangedEventId,
+            UIA_Text_TextSelectionChangedEventId,
+            UIA_Text_TextChangedEventId,
+            UIA_Text_TextSelectionChangedEventId,
+        ]);
     }
 
     #[test]
@@ -80,9 +77,21 @@ mod tests {
         throttle.record_snapshot_change(false, true);
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(150), &mut sink);
 
-        assert_eq!(
-            sink.events,
-            [UIA_Text_TextChangedEventId, UIA_ActiveTextPositionChangedEventId]
-        );
+        assert_eq!(sink.events, [
+            UIA_Text_TextChangedEventId,
+            UIA_Text_TextSelectionChangedEventId
+        ]);
+    }
+
+    #[test]
+    fn does_not_emit_text_pattern2_active_text_position_event() {
+        let start = Instant::now();
+        let mut throttle = UiaEventThrottle::new(Duration::from_millis(75), start);
+        let mut sink = RecordingSink { listening: true, events: Vec::new() };
+
+        throttle.record_snapshot_change(false, true);
+        throttle.flush_due(std::ptr::null_mut(), start, &mut sink);
+
+        assert_eq!(sink.events, [UIA_Text_TextSelectionChangedEventId]);
     }
 }

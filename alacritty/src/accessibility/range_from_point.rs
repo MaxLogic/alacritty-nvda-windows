@@ -2,9 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-    use windows_sys::core::BSTR;
     use windows_sys::Win32::Foundation::{SysFreeString, SysStringLen};
-    use windows_sys::Win32::UI::Accessibility::{TextUnit_Line, UiaPoint};
+    use windows_sys::Win32::UI::Accessibility::{TextUnit_Line, TextUnit_Paragraph, UiaPoint};
+    use windows_sys::core::BSTR;
 
     use crate::accessibility::text_pattern::RawTextProvider;
 
@@ -46,6 +46,40 @@ mod tests {
             assert!(!range.is_null());
             assert_eq!(range_text(range), "second");
 
+            release_range(range);
+            (vtable.release)(raw_provider);
+        }
+    }
+
+    #[test]
+    fn range_from_point_paragraph_expands_to_terminal_line() {
+        let provider = RawTextProvider::allocate("first\nsecond\nthird".to_owned());
+        unsafe {
+            (*provider.as_ptr()).set_test_layout(10.0, 20.0, 8.0, 16.0, 6, 3);
+        }
+
+        let raw_provider = provider.as_ptr().cast();
+        let vtable = unsafe { (*provider.as_ptr()).vtable };
+
+        unsafe {
+            let mut range = std::ptr::null_mut();
+            let point = UiaPoint { x: 10.0 + 3.0 * 8.0, y: 20.0 + 1.0 * 16.0 };
+            assert_eq!((vtable.range_from_point)(raw_provider, point, &mut range), 0);
+            assert!(!range.is_null());
+
+            let range_vtable =
+                *(range as *mut &'static crate::accessibility::text_pattern::RawTextRangeVtable);
+            assert_eq!((range_vtable.expand_to_enclosing_unit)(range, TextUnit_Paragraph), 0);
+
+            let mut text: BSTR = std::ptr::null_mut();
+            assert_eq!((range_vtable.get_text)(range, -1, &mut text), 0);
+            let value = String::from_utf16_lossy(std::slice::from_raw_parts(
+                text,
+                SysStringLen(text) as usize,
+            ));
+            assert_eq!(value, "second");
+
+            SysFreeString(text);
             release_range(range);
             (vtable.release)(raw_provider);
         }

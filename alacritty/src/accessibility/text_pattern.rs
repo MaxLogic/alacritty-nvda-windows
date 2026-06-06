@@ -3,21 +3,23 @@
 use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use windows_sys::core::{BSTR, GUID, HRESULT};
-use windows_sys::Win32::Foundation::{SysAllocStringLen, BOOL, E_FAIL, HWND, S_OK};
+use windows_sys::Win32::Foundation::{BOOL, E_FAIL, HWND, S_OK, SysAllocStringLen};
 use windows_sys::Win32::System::Com::SAFEARRAY;
 use windows_sys::Win32::System::Ole::{
     SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement, SafeArraySetIID,
 };
-use windows_sys::Win32::System::Variant::{VariantInit, VARENUM, VARIANT, VT_EMPTY, VT_UNKNOWN};
+use windows_sys::Win32::System::Variant::{
+    VARENUM, VARIANT, VT_EMPTY, VT_R8, VT_UNKNOWN, VariantInit,
+};
 use windows_sys::Win32::UI::Accessibility::{
     SupportedTextSelection, SupportedTextSelection_Multiple, TextPatternRangeEndpoint,
     TextPatternRangeEndpoint_Start, TextUnit, TextUnit_Character, TextUnit_Document, TextUnit_Line,
-    TextUnit_Word, UiaPoint, UIA_TEXTATTRIBUTE_ID,
+    TextUnit_Paragraph, TextUnit_Word, UIA_TEXTATTRIBUTE_ID, UiaPoint,
 };
+use windows_sys::core::{BSTR, GUID, HRESULT};
 
 use crate::accessibility::snapshot::VisibleTerminalSnapshot;
 use crate::accessibility::windows_provider::{add_ref_raw_provider, release_raw_provider};
@@ -29,6 +31,17 @@ const E_POINTER: HRESULT = 0x8000_4003u32 as i32;
 const IID_IUNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
 const IID_ITEXT_PROVIDER: GUID = GUID::from_u128(0x3589c92c_63f3_4367_99bb_ada653b77cf2);
 const IID_ITEXT_RANGE_PROVIDER: GUID = GUID::from_u128(0x5347ad7b_c355_46f8_aff5_909033582f63);
+
+fn trace_uia(message: &str) {
+    if let Ok(path) = std::env::var("ALACRITTY_UIA_DEBUG_TRACE") {
+        let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(
+            |mut file| {
+                use std::io::Write;
+                writeln!(file, "{message}")
+            },
+        );
+    }
+}
 
 /// UIA TextPattern provider backed by the latest visible terminal text.
 #[repr(C)]
@@ -247,6 +260,7 @@ unsafe extern "system" fn text_provider_query_interface(
     unsafe {
         *interface = ptr::null_mut();
         if guid_eq(&*iid, &IID_IUNKNOWN) || guid_eq(&*iid, &IID_ITEXT_PROVIDER) {
+            trace_uia("text_provider.QueryInterface ITextProvider");
             text_provider_add_ref(this);
             *interface = this;
             S_OK
@@ -285,6 +299,7 @@ unsafe extern "system" fn text_provider_get_selection(
     }
 
     unsafe { *ranges = ptr::null_mut() };
+    trace_uia("text_provider.GetSelection");
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let (text, selection) = provider.text_and_selection();
     if selection.is_empty() {
@@ -332,6 +347,7 @@ unsafe extern "system" fn text_provider_get_visible_ranges(
     }
 
     unsafe { *ranges = ptr::null_mut() };
+    trace_uia("text_provider.GetVisibleRanges");
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let text = provider.text();
     let end = text.len();
@@ -342,11 +358,7 @@ unsafe extern "system" fn text_provider_get_visible_ranges(
         *ranges = array;
     }
 
-    if array.is_null() {
-        E_FAIL
-    } else {
-        S_OK
-    }
+    if array.is_null() { E_FAIL } else { S_OK }
 }
 
 unsafe extern "system" fn text_provider_range_from_child(
@@ -373,6 +385,7 @@ unsafe extern "system" fn text_provider_range_from_point(
 
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let (text, offset) = provider.range_from_point(point);
+    trace_uia(&format!("text_provider.RangeFromPoint offset={offset}"));
     let text_range = RawTextRange::allocate(text, offset, offset, provider.enclosing_provider);
     unsafe { *range = text_range.as_ptr().cast() };
     S_OK
@@ -388,6 +401,7 @@ unsafe extern "system" fn text_provider_document_range(
 
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let text = provider.text();
+    trace_uia(&format!("text_provider.DocumentRange len={}", text.len()));
     let text_range =
         RawTextRange::allocate(text.clone(), 0, text.len(), provider.enclosing_provider);
     unsafe { *range = text_range.as_ptr().cast() };
@@ -403,6 +417,7 @@ unsafe extern "system" fn text_provider_supported_text_selection(
     }
 
     unsafe { *selection = SupportedTextSelection_Multiple };
+    trace_uia("text_provider.SupportedTextSelection multiple");
     S_OK
 }
 
@@ -447,11 +462,7 @@ impl RawTextRange {
     }
 
     fn endpoint_offset(&self, endpoint: TextPatternRangeEndpoint) -> usize {
-        if endpoint == TextPatternRangeEndpoint_Start {
-            self.start
-        } else {
-            self.end
-        }
+        if endpoint == TextPatternRangeEndpoint_Start { self.start } else { self.end }
     }
 }
 
@@ -553,6 +564,7 @@ unsafe extern "system" fn text_range_query_interface(
     unsafe {
         *interface = ptr::null_mut();
         if guid_eq(&*iid, &IID_IUNKNOWN) || guid_eq(&*iid, &IID_ITEXT_RANGE_PROVIDER) {
+            trace_uia("text_range.QueryInterface ITextRangeProvider");
             text_range_add_ref(this);
             *interface = this;
             S_OK
@@ -648,6 +660,7 @@ unsafe extern "system" fn text_range_expand_to_enclosing_unit(
     unit: TextUnit,
 ) -> HRESULT {
     let range = unsafe { &mut *(this as *mut RawTextRange) };
+    trace_uia(&format!("text_range.ExpandToEnclosingUnit {unit}"));
     if unit == TextUnit_Character {
         let start = previous_char_boundary(&range.text, range.start);
         range.start = start;
@@ -656,7 +669,7 @@ unsafe extern "system" fn text_range_expand_to_enclosing_unit(
         let (start, end) = word_bounds(&range.text, range.start);
         range.start = start;
         range.end = end;
-    } else if unit == TextUnit_Line {
+    } else if is_terminal_line_unit(unit) {
         let (start, end) = line_bounds(&range.text, range.start);
         range.start = start;
         range.end = end;
@@ -710,6 +723,7 @@ unsafe extern "system" fn text_range_get_attribute_value(
         VariantInit(value);
         (*value).Anonymous.Anonymous.vt = VT_EMPTY;
     }
+    trace_uia(&format!("text_range.GetAttributeValue {_attribute_id} VT_EMPTY"));
     S_OK
 }
 
@@ -721,7 +735,8 @@ unsafe extern "system" fn text_range_get_bounding_rectangles(
         return E_POINTER;
     }
 
-    unsafe { *rectangles = empty_array(VT_EMPTY) };
+    unsafe { *rectangles = empty_array(VT_R8) };
+    trace_uia("text_range.GetBoundingRectangles VT_R8 empty");
     S_OK
 }
 
@@ -738,6 +753,7 @@ unsafe extern "system" fn text_range_get_enclosing_element(
         add_ref_raw_provider(range.enclosing_provider);
         *provider = range.enclosing_provider;
     }
+    trace_uia("text_range.GetEnclosingElement");
     S_OK
 }
 
@@ -752,6 +768,7 @@ unsafe extern "system" fn text_range_get_text(
 
     let range = unsafe { &*(this as *const RawTextRange) };
     let selected_text = range.selected_text(max_length);
+    trace_uia(&format!("text_range.GetText max={max_length} len={}", selected_text.len()));
     unsafe { *text = string_to_bstr(&selected_text) };
     S_OK
 }
@@ -779,13 +796,14 @@ unsafe extern "system" fn text_range_move(
     if unit == TextUnit_Word {
         let (_, end) = word_bounds(&range.text, new_start);
         range.end = end;
-    } else if unit == TextUnit_Line {
+    } else if is_terminal_line_unit(unit) {
         let (_, end) = line_bounds(&range.text, new_start);
         range.end = end;
     } else {
         range.end = clamp_to_boundary(&range.text, new_start.saturating_add(width));
     }
     unsafe { *moved = actual };
+    trace_uia(&format!("text_range.Move unit={unit} count={count} moved={actual}"));
     S_OK
 }
 
@@ -822,6 +840,10 @@ unsafe extern "system" fn text_range_move_endpoint_by_unit(
     }
 
     unsafe { *moved = actual };
+    trace_uia(&format!(
+        "text_range.MoveEndpointByUnit endpoint={endpoint} unit={unit} count={count} \
+         moved={actual}"
+    ));
     S_OK
 }
 
@@ -879,6 +901,7 @@ unsafe extern "system" fn text_range_get_children(
     }
 
     unsafe { *children = empty_unknown_safearray() };
+    trace_uia("text_range.GetChildren empty");
     S_OK
 }
 
@@ -919,7 +942,7 @@ fn move_offset_by_unit(text: &str, offset: usize, unit: TextUnit, count: i32) ->
         move_offset_by_boundaries(text, offset, count, char_boundaries(text))
     } else if unit == TextUnit_Word {
         move_offset_by_boundaries(text, offset, count, word_starts(text))
-    } else if unit == TextUnit_Line {
+    } else if is_terminal_line_unit(unit) {
         move_offset_by_boundaries(text, offset, count, line_starts(text))
     } else if unit == TextUnit_Document {
         if count > 0 && offset < text.len() {
@@ -937,7 +960,7 @@ fn move_offset_by_unit(text: &str, offset: usize, unit: TextUnit, count: i32) ->
 fn normalized_unit_start(text: &str, offset: usize, unit: TextUnit) -> usize {
     if unit == TextUnit_Word {
         word_bounds(text, offset).0
-    } else if unit == TextUnit_Line {
+    } else if is_terminal_line_unit(unit) {
         line_bounds(text, offset).0
     } else {
         offset
@@ -972,6 +995,10 @@ fn line_starts(text: &str) -> Vec<usize> {
     starts.extend(text.match_indices('\n').map(|(index, _)| index + 1));
     starts.push(text.len());
     starts
+}
+
+fn is_terminal_line_unit(unit: TextUnit) -> bool {
+    unit == TextUnit_Line || unit == TextUnit_Paragraph
 }
 
 fn word_starts(text: &str) -> Vec<usize> {
@@ -1080,10 +1107,13 @@ fn guid_eq(left: &GUID, right: &GUID) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use windows_sys::core::BSTR;
     use windows_sys::Win32::Foundation::{SysFreeString, SysStringLen};
-    use windows_sys::Win32::System::Ole::{SafeArrayDestroy, SafeArrayGetElement};
+    use windows_sys::Win32::System::Ole::{
+        SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetVartype,
+    };
+    use windows_sys::Win32::System::Variant::VT_R8;
     use windows_sys::Win32::UI::Accessibility::SupportedTextSelection_Multiple;
+    use windows_sys::core::BSTR;
 
     use super::RawTextProvider;
 
@@ -1159,6 +1189,32 @@ mod tests {
             SysFreeString(text);
             (range_vtable.release)(range);
             SafeArrayDestroy(ranges);
+            (vtable.release)(raw_provider);
+        }
+    }
+
+    #[test]
+    fn bounding_rectangles_returns_double_array_even_when_empty() {
+        let provider = RawTextProvider::allocate("visible viewport".to_owned());
+        let raw_provider = provider.as_ptr().cast();
+        let vtable = unsafe { (*provider.as_ptr()).vtable };
+
+        unsafe {
+            let mut range = std::ptr::null_mut();
+            assert_eq!((vtable.document_range)(raw_provider, &mut range), 0);
+            assert!(!range.is_null());
+
+            let range_vtable = *(range as *mut &'static super::RawTextRangeVtable);
+            let mut rectangles = std::ptr::null_mut();
+            assert_eq!((range_vtable.get_bounding_rectangles)(range, &mut rectangles), 0);
+            assert!(!rectangles.is_null());
+
+            let mut vartype = 0;
+            assert_eq!(SafeArrayGetVartype(rectangles, &mut vartype), 0);
+            assert_eq!(vartype, VT_R8);
+
+            SafeArrayDestroy(rectangles);
+            (range_vtable.release)(range);
             (vtable.release)(raw_provider);
         }
     }

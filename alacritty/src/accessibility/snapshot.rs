@@ -3,7 +3,7 @@
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{point_to_viewport, Term};
+use alacritty_terminal::term::{Term, point_to_viewport};
 
 /// Immutable snapshot of the terminal's visible text.
 #[derive(Clone, Debug)]
@@ -128,7 +128,8 @@ impl VisibleTerminalSnapshot {
 
     /// Convert the terminal's active visible selection to byte offsets into [`Self::text`].
     pub fn selection_offsets<T>(&self, term: &Term<T>) -> Vec<(usize, usize)> {
-        let Some(selection) = term.selection.as_ref().and_then(|selection| selection.to_range(term))
+        let Some(selection) =
+            term.selection.as_ref().and_then(|selection| selection.to_range(term))
         else {
             return Vec::new();
         };
@@ -140,7 +141,8 @@ impl VisibleTerminalSnapshot {
             return (selection.start.line.0..=selection.end.line.0)
                 .filter_map(|line| {
                     let row = point_to_viewport(display_offset, Point::new(Line(line), Column(0)))?;
-                    let start = self.offset_for_point(Point::new(row.line, Column(start_column)))?;
+                    let start =
+                        self.offset_for_point(Point::new(row.line, Column(start_column)))?;
                     let end =
                         self.offset_for_point(Point::new(row.line, Column(end_column + 1)))?;
                     (start < end).then_some((start, end))
@@ -156,11 +158,8 @@ impl VisibleTerminalSnapshot {
 
         let start_line = selection.start.line.0.max(visible_top);
         let end_line = selection.end.line.0.min(visible_bottom);
-        let start_column = if selection.start.line.0 < visible_top {
-            Column(0)
-        } else {
-            selection.start.column
-        };
+        let start_column =
+            if selection.start.line.0 < visible_top { Column(0) } else { selection.start.column };
         let end_column = if selection.end.line.0 > visible_bottom {
             Column(self.columns)
         } else {
@@ -225,8 +224,7 @@ impl SnapshotRow {
 #[cfg(test)]
 mod tests {
     use alacritty_terminal::grid::Dimensions;
-    use alacritty_terminal::index::{Column, Line, Point};
-    use alacritty_terminal::index::Side;
+    use alacritty_terminal::index::{Column, Line, Point, Side};
     use alacritty_terminal::selection::{Selection, SelectionType};
     use alacritty_terminal::term::cell::Flags;
     use alacritty_terminal::term::test::TermSize;
@@ -329,8 +327,11 @@ mod tests {
         let mut term = term(4, 2);
         term.grid_mut()[Line(0)][Column(0)].c = 'a';
         term.grid_mut()[Line(0)][Column(1)].c = 'b';
-        term.selection =
-            Some(Selection::new(SelectionType::Simple, Point::new(Line(-1), Column(0)), Side::Left));
+        term.selection = Some(Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(-1), Column(0)),
+            Side::Left,
+        ));
         term.selection.as_mut().unwrap().update(Point::new(Line(0), Column(1)), Side::Right);
 
         let snapshot = VisibleTerminalSnapshot::from_term(&term);

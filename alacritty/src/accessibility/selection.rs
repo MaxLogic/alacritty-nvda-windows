@@ -2,10 +2,10 @@
 
 #[cfg(test)]
 mod tests {
-    use windows_sys::core::BSTR;
     use windows_sys::Win32::Foundation::{SysFreeString, SysStringLen};
     use windows_sys::Win32::System::Ole::{SafeArrayDestroy, SafeArrayGetElement};
     use windows_sys::Win32::UI::Accessibility::SupportedTextSelection_Multiple;
+    use windows_sys::core::BSTR;
 
     use crate::accessibility::text_pattern::RawTextProvider;
 
