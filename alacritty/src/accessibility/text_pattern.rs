@@ -213,7 +213,14 @@ impl RawTextProvider {
 
     fn text_and_selection(&self) -> (String, Vec<(usize, usize)>) {
         let state = self.state.read().expect("text provider lock poisoned");
-        (state.text.clone(), state.selection.clone())
+        let text = state.text.clone();
+        let selection = if state.selection.is_empty() {
+            let caret = clamp_to_boundary(&text, state.cursor_offset());
+            vec![(caret, caret)]
+        } else {
+            state.selection.clone()
+        };
+        (text, selection)
     }
 
     fn range_from_point(&self, point: UiaPoint) -> (String, usize) {
@@ -331,10 +338,6 @@ unsafe extern "system" fn text_provider_get_selection(
     trace_uia("text_provider.GetSelection");
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let (text, selection) = provider.text_and_selection();
-    if selection.is_empty() {
-        unsafe { *ranges = empty_unknown_safearray() };
-        return S_OK;
-    }
 
     let array = unsafe { SafeArrayCreateVector(VT_UNKNOWN, 0, selection.len() as u32) };
     if array.is_null() {
