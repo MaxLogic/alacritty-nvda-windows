@@ -265,9 +265,9 @@ impl Window {
     }
 
     #[cfg(windows)]
-    pub fn update_accessibility_snapshot<T: EventListener>(&self, term: &Term<T>) {
+    pub fn update_accessibility_snapshot<T: EventListener>(&self, term: &Term<T>, size: &SizeInfo) {
         if let Some(accessibility) = &self._accessibility {
-            accessibility.update_snapshot(term);
+            accessibility.update_snapshot(term, size);
         }
     }
 
