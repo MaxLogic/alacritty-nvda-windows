@@ -2,32 +2,14 @@
 Next task ID: T-008
 
 ## Summary
-Open tasks: 2 (In Progress: 0, Next Today: 0, Next This Week: 1, Next Later: 1, Blocked: 0)
-Done tasks: 5
+Open tasks: 1 (In Progress: 0, Next Today: 0, Next This Week: 0, Next Later: 1, Blocked: 0)
+Done tasks: 6
 
 ## In Progress
 
 ## Next – Today
 
 ## Next – This Week
-
-### T-006 [A11Y] Throttle UIA text and caret events
-Outcome:
-- UIA events are skipped when `UiaClientsAreListening()` is false
-- terminal text changes are coalesced to at most one event per throttle interval per window
-- caret/cursor updates coalesce to the latest known position
-- sustained output does not emit one UIA event per byte, cell, line, parser update, or frame
-Proof:
-- Run: `cargo test -p alacritty accessibility::event_throttle`
-  Expect: all pass
-- Run: `cargo check -p alacritty --target x86_64-pc-windows-msvc`
-  Expect: exit=0
-- Run: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\accessibility\probe-uia-event-throttle.ps1`
-  Expect: exit=0, stdout contains "Event coalescing: PASS"
-Touches: alacritty/src/accessibility/, alacritty/src/window_context.rs, scripts/accessibility/
-Deps: T-003, T-004
-Verify: unit-test, cli-proof, manual
-Notes: Source plan Slice 6. Start with a 50-100 ms internal throttle and tune from evidence; do not rely on NVDA alone for flood control.
 
 ## Next – Later
 
@@ -51,6 +33,24 @@ Notes: Source plan Slice 7. This is a follow-up after visible viewport reading a
 ## Blocked
 
 ## Done
+
+### T-006 [A11Y] Throttle UIA text and caret events
+Outcome:
+- UIA events are skipped when `UiaClientsAreListening()` is false
+- terminal text changes are coalesced to at most one event per throttle interval per window
+- caret/cursor updates coalesce to the latest known position
+- sustained output does not emit one UIA event per byte, cell, line, parser update, or frame
+Proof:
+- Run: `cargo test -p alacritty accessibility::event_throttle`
+  Expect: all pass
+- Run: `cargo check -p alacritty --target x86_64-pc-windows-msvc`
+  Expect: exit=0
+- Run: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\accessibility\probe-uia-event-throttle.ps1`
+  Expect: exit=0, stdout contains "Event coalescing: PASS"
+Touches: alacritty/src/accessibility/, alacritty/src/window_context.rs, scripts/accessibility/
+Deps: T-003, T-004
+Verify: unit-test, cli-proof, manual
+Notes: Source plan Slice 6. Start with a 50-100 ms internal throttle and tune from evidence; do not rely on NVDA alone for flood control.
 
 ### T-005 [A11Y] Map mouse coordinates with UIA RangeFromPoint
 Outcome:

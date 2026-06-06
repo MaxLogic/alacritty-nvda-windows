@@ -4,22 +4,28 @@ use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::EventListener;
+use alacritty_terminal::index::Point;
 use alacritty_terminal::term::Term;
 use windows_sys::core::{BSTR, GUID, HRESULT};
 use windows_sys::Win32::Foundation::{
     HWND, LPARAM, LRESULT, POINT, RECT, S_OK, VARIANT_TRUE, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
+use windows_sys::Win32::System::Com::SAFEARRAY;
 use windows_sys::Win32::System::Variant::{
     VariantInit, VARENUM, VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4,
 };
 use windows_sys::Win32::UI::Accessibility::{
     ProviderOptions, ProviderOptions_ServerSideProvider, UIA_ControlTypePropertyId,
-    UIA_IsContentElementPropertyId, UIA_IsControlElementPropertyId,
-    UIA_IsKeyboardFocusablePropertyId, UIA_IsTextPatternAvailablePropertyId, UIA_NamePropertyId,
-    UIA_TextControlTypeId, UIA_TextPatternId, UiaDisconnectProvider, UiaHostProviderFromHwnd,
+    UIA_ActiveTextPositionChangedEventId, UIA_IsContentElementPropertyId,
+    UIA_IsControlElementPropertyId, UIA_IsKeyboardFocusablePropertyId,
+    UIA_IsTextPatternAvailablePropertyId, UIA_NamePropertyId, UIA_TextControlTypeId,
+    UIA_TextPatternId, UIA_Text_TextChangedEventId, UiaClientsAreListening,
+    UiaDisconnectProvider, UiaHostProviderFromHwnd, UiaRaiseAutomationEvent,
     UiaReturnRawElementProvider, UiaRootObjectId, UIA_PROPERTY_ID,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
@@ -33,9 +39,112 @@ use crate::display::SizeInfo;
 const E_NOINTERFACE: HRESULT = 0x8000_4002u32 as i32;
 const E_POINTER: HRESULT = 0x8000_4003u32 as i32;
 const IID_IUNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
+const IID_IRAW_ELEMENT_PROVIDER_ADVISE_EVENTS: GUID =
+    GUID::from_u128(0xa407b27b_0f6d_4427_9292_473c7bf93258);
 const IID_IRAW_ELEMENT_PROVIDER_SIMPLE: GUID =
     GUID::from_u128(0xd6dd68d1_86fd_4332_8666_9abedea2d24c);
 const SUBCLASS_ID: usize = 1;
+const UIA_EVENT_THROTTLE: Duration = Duration::from_millis(75);
+
+pub(crate) trait UiaEventSink {
+    fn clients_are_listening(&self) -> bool;
+
+    fn raise_event(&mut self, provider: *mut c_void, event_id: i32);
+}
+
+#[derive(Debug)]
+pub(crate) struct NativeUiaEventSink {
+    provider: NonNull<RawProvider>,
+}
+
+impl UiaEventSink for NativeUiaEventSink {
+    fn clients_are_listening(&self) -> bool {
+        unsafe {
+            UiaClientsAreListening() != 0
+                || (*self.provider.as_ptr()).has_advised_event_listeners()
+        }
+    }
+
+    fn raise_event(&mut self, provider: *mut c_void, event_id: i32) {
+        let _ = unsafe { UiaRaiseAutomationEvent(provider, event_id) };
+        if let Ok(path) = std::env::var("ALACRITTY_UIA_EVENT_TRACE") {
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .and_then(|mut file| {
+                    use std::io::Write;
+                    writeln!(file, "{event_id}")
+                });
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PublishedSnapshotState {
+    text: String,
+    cursor: Point<usize>,
+}
+
+#[derive(Debug)]
+pub(crate) struct UiaEventThrottle {
+    interval: Duration,
+    last_emit: Instant,
+    has_emitted: bool,
+    pending_text: bool,
+    pending_caret: bool,
+}
+
+impl UiaEventThrottle {
+    pub(crate) fn new(interval: Duration, now: Instant) -> Self {
+        Self {
+            interval,
+            last_emit: now,
+            has_emitted: false,
+            pending_text: false,
+            pending_caret: false,
+        }
+    }
+
+    pub(crate) fn record_snapshot_change(&mut self, text_changed: bool, caret_changed: bool) {
+        self.pending_text |= text_changed;
+        self.pending_caret |= caret_changed;
+    }
+
+    pub(crate) fn flush_due<S: UiaEventSink>(
+        &mut self,
+        provider: *mut c_void,
+        now: Instant,
+        sink: &mut S,
+    ) {
+        if !self.pending_text && !self.pending_caret {
+            return;
+        }
+
+        if !sink.clients_are_listening() {
+            self.pending_text = false;
+            self.pending_caret = false;
+            self.last_emit = now;
+            return;
+        }
+
+        if self.has_emitted && now.duration_since(self.last_emit) < self.interval {
+            return;
+        }
+
+        if self.pending_text {
+            sink.raise_event(provider, UIA_Text_TextChangedEventId);
+        }
+        if self.pending_caret {
+            sink.raise_event(provider, UIA_ActiveTextPositionChangedEventId);
+        }
+
+        self.pending_text = false;
+        self.pending_caret = false;
+        self.last_emit = now;
+        self.has_emitted = true;
+    }
+}
 
 /// Minimal UIA provider state for an Alacritty terminal window.
 #[derive(Clone, Debug)]
@@ -100,6 +209,8 @@ impl TerminalProvider {
 pub struct WindowsAccessibility {
     hwnd: HWND,
     provider: NonNull<RawProvider>,
+    last_snapshot: Mutex<Option<PublishedSnapshotState>>,
+    event_throttle: Mutex<UiaEventThrottle>,
 }
 
 impl WindowsAccessibility {
@@ -122,7 +233,12 @@ impl WindowsAccessibility {
             }
             None
         } else {
-            Some(Self { hwnd, provider })
+            Some(Self {
+                hwnd,
+                provider,
+                last_snapshot: Mutex::new(None),
+                event_throttle: Mutex::new(UiaEventThrottle::new(UIA_EVENT_THROTTLE, Instant::now())),
+            })
         }
     }
 
@@ -133,10 +249,30 @@ impl WindowsAccessibility {
     pub fn update_snapshot<T: EventListener>(&self, term: &Term<T>, size_info: &SizeInfo) {
         let snapshot = VisibleTerminalSnapshot::from_term(term);
         let layout = self.layout_for_snapshot(&snapshot, size_info);
+        let (text_changed, caret_changed) =
+            self.snapshot_changes(snapshot.text().to_owned(), snapshot.cursor());
         unsafe {
             let provider = &*self.provider.as_ptr();
             provider.set_terminal_state(snapshot, layout);
         }
+        self.record_and_flush_events(text_changed, caret_changed);
+    }
+
+    fn snapshot_changes(&self, text: String, cursor: Point<usize>) -> (bool, bool) {
+        let mut last_snapshot = self.last_snapshot.lock().expect("accessibility state lock poisoned");
+        let text_changed =
+            last_snapshot.as_ref().is_none_or(|snapshot| snapshot.text != text);
+        let caret_changed =
+            last_snapshot.as_ref().is_none_or(|snapshot| snapshot.cursor != cursor);
+        *last_snapshot = Some(PublishedSnapshotState { text, cursor });
+        (text_changed, caret_changed)
+    }
+
+    fn record_and_flush_events(&self, text_changed: bool, caret_changed: bool) {
+        let mut throttle = self.event_throttle.lock().expect("event throttle lock poisoned");
+        throttle.record_snapshot_change(text_changed, caret_changed);
+        let mut sink = NativeUiaEventSink { provider: self.provider };
+        throttle.flush_due(self.raw_provider(), Instant::now(), &mut sink);
     }
 
     fn layout_for_snapshot(
@@ -212,10 +348,12 @@ unsafe extern "system" fn accessibility_subclass_proc(
 #[derive(Debug)]
 struct RawProvider {
     vtable: &'static RawProviderVtable,
+    advise_events: RawProviderAdviseEvents,
     ref_count: AtomicU32,
     hwnd: HWND,
     provider: TerminalProvider,
     text_provider: NonNull<RawTextProvider>,
+    advised_event_listeners: AtomicU32,
     #[cfg(test)]
     drop_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
@@ -226,10 +364,12 @@ impl RawProvider {
             RawTextProvider::allocate_for_window(hwnd, ptr::null_mut(), String::new());
         Self {
             vtable: &RAW_PROVIDER_VTABLE,
+            advise_events: RawProviderAdviseEvents::new(),
             ref_count: AtomicU32::new(1),
             hwnd,
             provider,
             text_provider,
+            advised_event_listeners: AtomicU32::new(0),
             #[cfg(test)]
             drop_counter: None,
         }
@@ -240,6 +380,7 @@ impl RawProvider {
         unsafe {
             provider.set_enclosing_provider();
         }
+        provider.set_advise_events_owner();
         NonNull::from(Box::leak(provider))
     }
 
@@ -253,6 +394,7 @@ impl RawProvider {
         unsafe {
             provider.set_enclosing_provider();
         }
+        provider.set_advise_events_owner();
         provider.drop_counter = Some(drop_counter);
         NonNull::from(Box::leak(provider))
     }
@@ -267,6 +409,10 @@ impl RawProvider {
         }
     }
 
+    fn set_advise_events_owner(&mut self) {
+        self.advise_events.owner = self.as_raw();
+    }
+
     fn set_terminal_state(
         &self,
         snapshot: VisibleTerminalSnapshot,
@@ -274,6 +420,29 @@ impl RawProvider {
     ) {
         unsafe {
             (*self.text_provider.as_ptr()).set_terminal_state(snapshot, layout);
+        }
+    }
+
+    fn has_advised_event_listeners(&self) -> bool {
+        self.advised_event_listeners.load(Ordering::Relaxed) > 0
+    }
+
+    fn advise_event_added(&self) {
+        self.advised_event_listeners.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn advise_event_removed(&self) {
+        let mut current = self.advised_event_listeners.load(Ordering::Relaxed);
+        while current > 0 {
+            match self.advised_event_listeners.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
         }
     }
 }
@@ -330,6 +499,48 @@ static RAW_PROVIDER_VTABLE: RawProviderVtable = RawProviderVtable {
     host_raw_element_provider,
 };
 
+#[repr(C)]
+#[derive(Debug)]
+struct RawProviderAdviseEvents {
+    vtable: &'static RawProviderAdviseEventsVtable,
+    owner: *mut c_void,
+}
+
+impl RawProviderAdviseEvents {
+    fn new() -> Self {
+        Self { vtable: &RAW_PROVIDER_ADVISE_EVENTS_VTABLE, owner: ptr::null_mut() }
+    }
+
+    fn as_raw(&self) -> *mut c_void {
+        self as *const Self as *mut c_void
+    }
+}
+
+#[repr(C)]
+struct RawProviderAdviseEventsVtable {
+    query_interface:
+        unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
+    add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
+    release: unsafe extern "system" fn(*mut c_void) -> u32,
+    advise_event_added: unsafe extern "system" fn(*mut c_void, i32, *mut SAFEARRAY) -> HRESULT,
+    advise_event_removed: unsafe extern "system" fn(*mut c_void, i32, *mut SAFEARRAY) -> HRESULT,
+}
+
+impl std::fmt::Debug for RawProviderAdviseEventsVtable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RawProviderAdviseEventsVtable")
+    }
+}
+
+static RAW_PROVIDER_ADVISE_EVENTS_VTABLE: RawProviderAdviseEventsVtable =
+    RawProviderAdviseEventsVtable {
+        query_interface: advise_events_query_interface,
+        add_ref: advise_events_add_ref,
+        release: advise_events_release,
+        advise_event_added,
+        advise_event_removed,
+    };
+
 unsafe extern "system" fn query_interface(
     this: *mut c_void,
     iid: *const GUID,
@@ -344,6 +555,11 @@ unsafe extern "system" fn query_interface(
         if guid_eq(&*iid, &IID_IUNKNOWN) || guid_eq(&*iid, &IID_IRAW_ELEMENT_PROVIDER_SIMPLE) {
             add_ref(this);
             *interface = this;
+            S_OK
+        } else if guid_eq(&*iid, &IID_IRAW_ELEMENT_PROVIDER_ADVISE_EVENTS) {
+            let provider = &*(this as *const RawProvider);
+            add_ref(this);
+            *interface = provider.advise_events.as_raw();
             S_OK
         } else {
             E_NOINTERFACE
@@ -369,6 +585,29 @@ unsafe extern "system" fn release(this: *mut c_void) -> u32 {
     }
 
     remaining
+}
+
+unsafe extern "system" fn advise_events_query_interface(
+    this: *mut c_void,
+    iid: *const GUID,
+    interface: *mut *mut c_void,
+) -> HRESULT {
+    if this.is_null() {
+        return E_POINTER;
+    }
+
+    let advise_events = unsafe { &*(this as *const RawProviderAdviseEvents) };
+    unsafe { query_interface(advise_events.owner, iid, interface) }
+}
+
+unsafe extern "system" fn advise_events_add_ref(this: *mut c_void) -> u32 {
+    let advise_events = unsafe { &*(this as *const RawProviderAdviseEvents) };
+    unsafe { add_ref(advise_events.owner) }
+}
+
+unsafe extern "system" fn advise_events_release(this: *mut c_void) -> u32 {
+    let advise_events = unsafe { &*(this as *const RawProviderAdviseEvents) };
+    unsafe { release(advise_events.owner) }
 }
 
 pub(crate) unsafe fn add_ref_raw_provider(provider: *mut c_void) -> u32 {
@@ -463,6 +702,42 @@ unsafe extern "system" fn host_raw_element_provider(
 
     let raw_provider = unsafe { &*(this as *const RawProvider) };
     unsafe { UiaHostProviderFromHwnd(raw_provider.hwnd, provider) }
+}
+
+unsafe extern "system" fn advise_event_added(
+    this: *mut c_void,
+    _event_id: i32,
+    _property_ids: *mut SAFEARRAY,
+) -> HRESULT {
+    if this.is_null() {
+        return E_POINTER;
+    }
+
+    let advise_events = unsafe { &*(this as *const RawProviderAdviseEvents) };
+    if !advise_events.owner.is_null() {
+        let provider = unsafe { &*(advise_events.owner as *const RawProvider) };
+        provider.advise_event_added();
+    }
+
+    S_OK
+}
+
+unsafe extern "system" fn advise_event_removed(
+    this: *mut c_void,
+    _event_id: i32,
+    _property_ids: *mut SAFEARRAY,
+) -> HRESULT {
+    if this.is_null() {
+        return E_POINTER;
+    }
+
+    let advise_events = unsafe { &*(this as *const RawProviderAdviseEvents) };
+    if !advise_events.owner.is_null() {
+        let provider = unsafe { &*(advise_events.owner as *const RawProvider) };
+        provider.advise_event_removed();
+    }
+
+    S_OK
 }
 
 fn guid_eq(left: &GUID, right: &GUID) -> bool {

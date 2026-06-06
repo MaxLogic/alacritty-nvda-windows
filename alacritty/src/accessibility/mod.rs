@@ -1,6 +1,8 @@
 //! Accessibility support.
 
 #[cfg(windows)]
+pub mod event_throttle;
+#[cfg(windows)]
 pub mod range_from_point;
 pub mod snapshot;
 #[cfg(windows)]
