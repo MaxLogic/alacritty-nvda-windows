@@ -2,27 +2,12 @@
 Next task ID: T-008
 
 ## Summary
-Open tasks: 6 (In Progress: 0, Next Today: 2, Next This Week: 3, Next Later: 1, Blocked: 0)
-Done tasks: 1
+Open tasks: 5 (In Progress: 0, Next Today: 1, Next This Week: 3, Next Later: 1, Blocked: 0)
+Done tasks: 2
 
 ## In Progress
 
 ## Next – Today
-
-### T-002 [A11Y] Attach Windows UIA provider to Alacritty HWND
-Outcome:
-- Windows builds create a per-window UI Automation provider for each Alacritty HWND
-- `WM_GETOBJECT` returns the provider through `UiaReturnRawElementProvider`
-- provider exposes sensible terminal element properties and is disconnected on window destruction
-Proof:
-- Run: `cargo check -p alacritty --target x86_64-pc-windows-msvc`
-  Expect: exit=0
-- Run: `cargo test -p alacritty accessibility::windows_provider`
-  Expect: all pass
-Touches: alacritty/Cargo.toml, alacritty/src/accessibility/, alacritty/src/display/window.rs
-Deps: T-001
-Verify: unit-test, build-only
-Notes: Source plan Slice 2. Prefer winit Windows hooks if available; otherwise subclass the HWND and restore the previous window procedure on drop.
 
 ### T-003 [A11Y] Expose visible text through UIA TextPattern
 Outcome:
@@ -118,6 +103,21 @@ Notes: Source plan Slice 7. This is a follow-up after visible viewport reading a
 ## Blocked
 
 ## Done
+
+### T-002 [A11Y] Attach Windows UIA provider to Alacritty HWND
+Outcome:
+- Windows builds create a per-window UI Automation provider for each Alacritty HWND
+- `WM_GETOBJECT` returns the provider through `UiaReturnRawElementProvider`
+- provider exposes sensible terminal element properties and is disconnected on window destruction
+Proof:
+- Run: `cargo check -p alacritty --target x86_64-pc-windows-msvc`
+  Expect: exit=0
+- Run: `cargo test -p alacritty accessibility::windows_provider`
+  Expect: all pass
+Touches: alacritty/Cargo.toml, alacritty/src/accessibility/, alacritty/src/display/window.rs
+Deps: T-001
+Verify: unit-test, build-only
+Notes: Source plan Slice 2. Prefer winit Windows hooks if available; otherwise subclass the HWND and restore the previous window procedure on drop.
 
 ### T-001 [A11Y] Add visible terminal snapshot model
 Outcome:
