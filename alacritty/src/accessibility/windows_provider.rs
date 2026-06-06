@@ -317,10 +317,12 @@ impl WindowsAccessibility {
         let mut last_snapshot =
             self.last_snapshot.lock().expect("accessibility state lock poisoned");
         let text_changed = last_snapshot.as_ref().is_none_or(|snapshot| snapshot.text != text);
-        let active_text_position_changed =
+        let cursor_changed =
             last_snapshot.as_ref().is_none_or(|snapshot| snapshot.cursor != cursor);
-        let selection_changed =
-            last_snapshot.as_ref().is_none_or(|snapshot| snapshot.selection != selection);
+        let active_text_position_changed = cursor_changed;
+        let selection_changed = last_snapshot
+            .as_ref()
+            .is_none_or(|snapshot| cursor_changed || snapshot.selection != selection);
         *last_snapshot = Some(PublishedSnapshotState { text, cursor, selection });
         (text_changed, selection_changed, active_text_position_changed)
     }

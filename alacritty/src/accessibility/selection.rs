@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn get_selection_returns_empty_array_without_selection() {
+    fn get_selection_returns_degenerate_caret_range_without_selection() {
         let provider = RawTextProvider::allocate("first\nsecond".to_owned());
         let raw_provider = provider.as_ptr().cast();
         let vtable = unsafe { (*provider.as_ptr()).vtable };
@@ -97,8 +97,10 @@ mod tests {
 
             let mut range: *mut std::ffi::c_void = std::ptr::null_mut();
             let index = 0;
-            assert_ne!(SafeArrayGetElement(ranges, &index, &mut range as *mut _ as *mut _), 0);
+            assert_eq!(SafeArrayGetElement(ranges, &index, &mut range as *mut _ as *mut _), 0);
+            assert_eq!(range_text(range), "");
 
+            release_range(range);
             SafeArrayDestroy(ranges);
             (vtable.release)(raw_provider);
         }
