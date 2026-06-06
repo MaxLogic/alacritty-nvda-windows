@@ -39,7 +39,11 @@ use winit::window::{
     WindowAttributes, WindowId,
 };
 
+#[cfg(windows)]
+use alacritty_terminal::event::EventListener;
 use alacritty_terminal::index::Point;
+#[cfg(windows)]
+use alacritty_terminal::term::Term;
 
 #[cfg(windows)]
 use crate::accessibility::windows_provider::{hwnd_from_raw_window_handle, WindowsAccessibility};
@@ -258,6 +262,13 @@ impl Window {
     pub fn set_title(&mut self, title: String) {
         self.title = title;
         self.window.set_title(&self.title);
+    }
+
+    #[cfg(windows)]
+    pub fn update_accessibility_snapshot<T: EventListener>(&self, term: &Term<T>) {
+        if let Some(accessibility) = &self._accessibility {
+            accessibility.update_snapshot(term);
+        }
     }
 
     /// Get the window title.
