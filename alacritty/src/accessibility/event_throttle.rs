@@ -6,7 +6,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use windows_sys::Win32::UI::Accessibility::{
-        UIA_ActiveTextPositionChangedEventId, UIA_Text_TextChangedEventId,
+        UIA_ActiveTextPositionChangedEventId, UIA_NotificationEventId, UIA_Text_TextChangedEventId,
         UIA_Text_TextSelectionChangedEventId,
     };
 
@@ -17,6 +17,7 @@ mod tests {
         listening: bool,
         events: Vec<i32>,
         active_text_position_events: usize,
+        notifications: Vec<String>,
     }
 
     impl UiaEventSink for RecordingSink {
@@ -31,63 +32,92 @@ mod tests {
         fn raise_active_text_position_changed(&mut self, _provider: *mut c_void) {
             self.active_text_position_events += 1;
         }
+
+        fn raise_notification(&mut self, _provider: *mut c_void, text: &str) {
+            self.events.push(UIA_NotificationEventId);
+            self.notifications.push(text.to_owned());
+        }
     }
 
     #[test]
     fn skips_events_when_no_uia_clients_are_listening() {
         let start = Instant::now();
         let mut throttle = UiaEventThrottle::new(Duration::from_millis(75), start);
-        let mut sink =
-            RecordingSink { listening: false, events: Vec::new(), active_text_position_events: 0 };
+        let mut sink = RecordingSink {
+            listening: false,
+            events: Vec::new(),
+            active_text_position_events: 0,
+            notifications: Vec::new(),
+        };
 
-        throttle.record_snapshot_change(true, true, true);
+        throttle.record_snapshot_change(true, true, true, Some("output".to_owned()));
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(100), &mut sink);
 
         assert!(sink.events.is_empty());
         assert_eq!(sink.active_text_position_events, 0);
+        assert!(sink.notifications.is_empty());
     }
 
     #[test]
     fn emits_first_change_immediately_then_coalesces_to_one_batch_per_interval() {
         let start = Instant::now();
         let mut throttle = UiaEventThrottle::new(Duration::from_millis(75), start);
-        let mut sink =
-            RecordingSink { listening: true, events: Vec::new(), active_text_position_events: 0 };
+        let mut sink = RecordingSink {
+            listening: true,
+            events: Vec::new(),
+            active_text_position_events: 0,
+            notifications: Vec::new(),
+        };
 
-        throttle.record_snapshot_change(true, true, true);
+        throttle.record_snapshot_change(true, true, true, Some("first".to_owned()));
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(30), &mut sink);
         assert_eq!(sink.events, [
             UIA_Text_TextChangedEventId,
-            UIA_Text_TextSelectionChangedEventId
+            UIA_Text_TextSelectionChangedEventId,
+            UIA_NotificationEventId
         ]);
         assert_eq!(sink.active_text_position_events, 1);
+        assert_eq!(sink.notifications, ["first"]);
 
-        throttle.record_snapshot_change(true, true, true);
-        throttle.record_snapshot_change(true, true, true);
+        throttle.record_snapshot_change(true, true, true, Some("second".to_owned()));
+        throttle.record_snapshot_change(true, true, true, Some("third".to_owned()));
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(60), &mut sink);
-        assert_eq!(sink.events.len(), 2);
+        assert_eq!(sink.events, [
+            UIA_Text_TextChangedEventId,
+            UIA_Text_TextSelectionChangedEventId,
+            UIA_NotificationEventId,
+            UIA_NotificationEventId,
+        ]);
         assert_eq!(sink.active_text_position_events, 1);
+        assert_eq!(sink.notifications, ["first", "second\nthird"]);
 
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(105), &mut sink);
         assert_eq!(sink.events, [
             UIA_Text_TextChangedEventId,
             UIA_Text_TextSelectionChangedEventId,
+            UIA_NotificationEventId,
+            UIA_NotificationEventId,
             UIA_Text_TextChangedEventId,
             UIA_Text_TextSelectionChangedEventId,
         ]);
         assert_eq!(sink.active_text_position_events, 2);
+        assert_eq!(sink.notifications, ["first", "second\nthird"]);
     }
 
     #[test]
     fn emits_latest_pending_change_after_previous_batch() {
         let start = Instant::now();
         let mut throttle = UiaEventThrottle::new(Duration::from_millis(75), start);
-        let mut sink =
-            RecordingSink { listening: true, events: Vec::new(), active_text_position_events: 0 };
+        let mut sink = RecordingSink {
+            listening: true,
+            events: Vec::new(),
+            active_text_position_events: 0,
+            notifications: Vec::new(),
+        };
 
-        throttle.record_snapshot_change(true, false, false);
+        throttle.record_snapshot_change(true, false, false, None);
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(75), &mut sink);
-        throttle.record_snapshot_change(false, true, true);
+        throttle.record_snapshot_change(false, true, true, None);
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(150), &mut sink);
 
         assert_eq!(sink.events, [
@@ -101,10 +131,14 @@ mod tests {
     fn emits_text_pattern2_active_text_position_through_dedicated_callback() {
         let start = Instant::now();
         let mut throttle = UiaEventThrottle::new(Duration::from_millis(75), start);
-        let mut sink =
-            RecordingSink { listening: true, events: Vec::new(), active_text_position_events: 0 };
+        let mut sink = RecordingSink {
+            listening: true,
+            events: Vec::new(),
+            active_text_position_events: 0,
+            notifications: Vec::new(),
+        };
 
-        throttle.record_snapshot_change(false, false, true);
+        throttle.record_snapshot_change(false, false, true, None);
         throttle.flush_due(std::ptr::null_mut(), start, &mut sink);
 
         assert!(sink.events.is_empty());
