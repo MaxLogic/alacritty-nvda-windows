@@ -11,7 +11,7 @@ use alacritty_terminal::event::EventListener;
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::Term;
 use windows_sys::Win32::Foundation::{
-    HWND, LPARAM, LRESULT, POINT, RECT, S_OK, VARIANT_TRUE, WPARAM,
+    HWND, LPARAM, LRESULT, POINT, RECT, S_OK, SysFreeString, VARIANT_TRUE, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::Com::SAFEARRAY;
@@ -19,14 +19,16 @@ use windows_sys::Win32::System::Variant::{
     VARENUM, VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4, VariantInit,
 };
 use windows_sys::Win32::UI::Accessibility::{
-    ProviderOptions, ProviderOptions_ServerSideProvider, UIA_ActiveTextPositionChangedEventId,
+    NotificationKind_ItemAdded, NotificationProcessing_CurrentThenMostRecent, ProviderOptions,
+    ProviderOptions_ServerSideProvider, UIA_ActiveTextPositionChangedEventId,
     UIA_ControlTypePropertyId, UIA_IsContentElementPropertyId, UIA_IsControlElementPropertyId,
     UIA_IsKeyboardFocusablePropertyId, UIA_IsTextPattern2AvailablePropertyId,
-    UIA_IsTextPatternAvailablePropertyId, UIA_NamePropertyId, UIA_PROPERTY_ID,
-    UIA_Text_TextChangedEventId, UIA_Text_TextSelectionChangedEventId, UIA_TextControlTypeId,
-    UIA_TextPattern2Id, UIA_TextPatternId, UiaClientsAreListening, UiaDisconnectProvider,
-    UiaHostProviderFromHwnd, UiaRaiseActiveTextPositionChangedEvent, UiaRaiseAutomationEvent,
-    UiaReturnRawElementProvider, UiaRootObjectId,
+    UIA_IsTextPatternAvailablePropertyId, UIA_NamePropertyId, UIA_NotificationEventId,
+    UIA_PROPERTY_ID, UIA_Text_TextChangedEventId, UIA_Text_TextSelectionChangedEventId,
+    UIA_TextControlTypeId, UIA_TextPattern2Id, UIA_TextPatternId, UiaClientsAreListening,
+    UiaDisconnectProvider, UiaHostProviderFromHwnd, UiaRaiseActiveTextPositionChangedEvent,
+    UiaRaiseAutomationEvent, UiaRaiseNotificationEvent, UiaReturnRawElementProvider,
+    UiaRootObjectId,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, OBJID_CLIENT, WM_GETOBJECT};
@@ -46,6 +48,7 @@ const IID_IRAW_ELEMENT_PROVIDER_SIMPLE: GUID =
     GUID::from_u128(0xd6dd68d1_86fd_4332_8666_9abedea2d24c);
 const SUBCLASS_ID: usize = 1;
 const UIA_EVENT_THROTTLE: Duration = Duration::from_millis(75);
+const MAX_NOTIFICATION_CHARS: usize = 4000;
 
 fn trace_uia(message: &str) {
     if let Ok(path) = std::env::var("ALACRITTY_UIA_DEBUG_TRACE") {
@@ -64,6 +67,8 @@ pub(crate) trait UiaEventSink {
     fn raise_event(&mut self, provider: *mut c_void, event_id: i32);
 
     fn raise_active_text_position_changed(&mut self, provider: *mut c_void);
+
+    fn raise_notification(&mut self, provider: *mut c_void, text: &str);
 }
 
 #[derive(Debug)]
@@ -97,6 +102,30 @@ impl UiaEventSink for NativeUiaEventSink {
             text_pattern::release_text_range(range);
         }
     }
+
+    fn raise_notification(&mut self, provider: *mut c_void, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+
+        trace_uia(&format!("raise_notification 20035 len={} text={text:?}", text.len()));
+        let display_string = string_to_bstr(text);
+        let activity_id = string_to_bstr("alacritty-terminal-output");
+        let _ = unsafe {
+            UiaRaiseNotificationEvent(
+                provider,
+                NotificationKind_ItemAdded,
+                NotificationProcessing_CurrentThenMostRecent,
+                display_string,
+                activity_id,
+            )
+        };
+        write_event_trace(UIA_NotificationEventId);
+        unsafe {
+            SysFreeString(display_string);
+            SysFreeString(activity_id);
+        }
+    }
 }
 
 fn write_event_trace(event_id: i32) {
@@ -125,6 +154,7 @@ pub(crate) struct UiaEventThrottle {
     pending_text: bool,
     pending_selection: bool,
     pending_active_text_position: bool,
+    pending_notification: Option<String>,
 }
 
 impl UiaEventThrottle {
@@ -136,6 +166,7 @@ impl UiaEventThrottle {
             pending_text: false,
             pending_selection: false,
             pending_active_text_position: false,
+            pending_notification: None,
         }
     }
 
@@ -144,10 +175,12 @@ impl UiaEventThrottle {
         text_changed: bool,
         selection_changed: bool,
         active_text_position_changed: bool,
+        notification: Option<String>,
     ) {
         self.pending_text |= text_changed;
         self.pending_selection |= selection_changed;
         self.pending_active_text_position |= active_text_position_changed;
+        self.record_notification(notification);
     }
 
     pub(crate) fn flush_due<S: UiaEventSink>(
@@ -156,7 +189,11 @@ impl UiaEventThrottle {
         now: Instant,
         sink: &mut S,
     ) {
-        if !self.pending_text && !self.pending_selection && !self.pending_active_text_position {
+        if !self.pending_text
+            && !self.pending_selection
+            && !self.pending_active_text_position
+            && self.pending_notification.is_none()
+        {
             return;
         }
 
@@ -164,11 +201,15 @@ impl UiaEventThrottle {
             self.pending_text = false;
             self.pending_selection = false;
             self.pending_active_text_position = false;
+            self.pending_notification = None;
             self.last_emit = now;
             return;
         }
 
         if self.has_emitted && now.duration_since(self.last_emit) < self.interval {
+            if let Some(notification) = self.pending_notification.take() {
+                sink.raise_notification(provider, &notification);
+            }
             return;
         }
 
@@ -181,12 +222,39 @@ impl UiaEventThrottle {
         if self.pending_active_text_position {
             sink.raise_active_text_position_changed(provider);
         }
+        if let Some(notification) = &self.pending_notification {
+            sink.raise_notification(provider, notification);
+        }
 
         self.pending_text = false;
         self.pending_selection = false;
         self.pending_active_text_position = false;
+        self.pending_notification = None;
         self.last_emit = now;
         self.has_emitted = true;
+    }
+
+    fn record_notification(&mut self, notification: Option<String>) {
+        let Some(notification) = notification else {
+            return;
+        };
+
+        if notification.trim().is_empty() {
+            return;
+        }
+
+        match &mut self.pending_notification {
+            Some(pending) => {
+                pending.push('\n');
+                pending.push_str(&notification);
+                truncate_notification(pending);
+                trace_uia(&format!("throttle.notification_pending combined len={}", pending.len()));
+            },
+            None => {
+                self.pending_notification = Some(truncated_notification(notification));
+                trace_uia("throttle.notification_pending new");
+            },
+        }
     }
 }
 
@@ -299,13 +367,18 @@ impl WindowsAccessibility {
         let snapshot = VisibleTerminalSnapshot::from_term(term);
         let layout = self.layout_for_snapshot(&snapshot, size_info);
         let selection = snapshot.selection_offsets(term);
-        let (text_changed, selection_changed, active_text_position_changed) =
+        let (text_changed, selection_changed, active_text_position_changed, notification) =
             self.snapshot_changes(snapshot.text().to_owned(), snapshot.cursor(), selection.clone());
         unsafe {
             let provider = &*self.provider.as_ptr();
             provider.set_terminal_state(snapshot, layout, selection);
         }
-        self.record_and_flush_events(text_changed, selection_changed, active_text_position_changed);
+        self.record_and_flush_events(
+            text_changed,
+            selection_changed,
+            active_text_position_changed,
+            notification,
+        );
     }
 
     fn snapshot_changes(
@@ -313,7 +386,7 @@ impl WindowsAccessibility {
         text: String,
         cursor: Point<usize>,
         selection: Vec<(usize, usize)>,
-    ) -> (bool, bool, bool) {
+    ) -> (bool, bool, bool, Option<String>) {
         let mut last_snapshot =
             self.last_snapshot.lock().expect("accessibility state lock poisoned");
         let text_changed = last_snapshot.as_ref().is_none_or(|snapshot| snapshot.text != text);
@@ -323,8 +396,17 @@ impl WindowsAccessibility {
         let selection_changed = last_snapshot
             .as_ref()
             .is_none_or(|snapshot| cursor_changed || snapshot.selection != selection);
+        let notification = last_snapshot
+            .as_ref()
+            .and_then(|snapshot| output_notification_text(&snapshot.text, &text));
+        if let Some(notification) = &notification {
+            trace_uia(&format!(
+                "snapshot.notification_candidate len={} text={notification:?}",
+                notification.len()
+            ));
+        }
         *last_snapshot = Some(PublishedSnapshotState { text, cursor, selection });
-        (text_changed, selection_changed, active_text_position_changed)
+        (text_changed, selection_changed, active_text_position_changed, notification)
     }
 
     fn record_and_flush_events(
@@ -332,12 +414,14 @@ impl WindowsAccessibility {
         text_changed: bool,
         selection_changed: bool,
         active_text_position_changed: bool,
+        notification: Option<String>,
     ) {
         let mut throttle = self.event_throttle.lock().expect("event throttle lock poisoned");
         throttle.record_snapshot_change(
             text_changed,
             selection_changed,
             active_text_position_changed,
+            notification,
         );
         let mut sink = NativeUiaEventSink { provider: self.provider };
         throttle.flush_due(self.raw_provider(), Instant::now(), &mut sink);
@@ -827,6 +911,103 @@ fn guid_eq(left: &GUID, right: &GUID) -> bool {
         && left.data4 == right.data4
 }
 
+fn output_notification_text(previous: &str, current: &str) -> Option<String> {
+    if let Some(lines) = inserted_lines(previous, current) {
+        return notification_from_lines(lines);
+    }
+
+    let inserted = inserted_text(previous, current)?;
+    if !inserted.contains('\n') {
+        return None;
+    }
+
+    notification_from_lines(inserted.lines().collect())
+}
+
+fn inserted_lines<'a>(previous: &str, current: &'a str) -> Option<Vec<&'a str>> {
+    if previous == current {
+        return None;
+    }
+
+    let previous_lines = previous.lines().collect::<Vec<_>>();
+    let current_lines = current.lines().collect::<Vec<_>>();
+    let max_overlap = previous_lines.len().min(current_lines.len());
+    for overlap in (1..=max_overlap).rev() {
+        if previous_lines[previous_lines.len() - overlap..] == current_lines[..overlap]
+            && current_lines.len() > overlap
+        {
+            return Some(current_lines[overlap..].to_vec());
+        }
+    }
+
+    None
+}
+
+fn notification_from_lines(lines: Vec<&str>) -> Option<String> {
+    let text = lines
+        .into_iter()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    (!text.is_empty()).then(|| truncated_notification(text))
+}
+
+fn inserted_text<'a>(previous: &str, current: &'a str) -> Option<&'a str> {
+    if previous == current {
+        return None;
+    }
+
+    let prefix = common_prefix_boundary(previous, current);
+    let previous_suffix = &previous[prefix..];
+    let current_suffix = &current[prefix..];
+    let suffix = common_suffix_boundary(previous_suffix, current_suffix);
+    if current_suffix.len() <= suffix {
+        return None;
+    }
+
+    Some(&current_suffix[..current_suffix.len() - suffix])
+}
+
+fn common_prefix_boundary(left: &str, right: &str) -> usize {
+    let mut prefix = 0;
+    for ((left_index, left_char), (right_index, right_char)) in
+        left.char_indices().zip(right.char_indices())
+    {
+        if left_char != right_char {
+            break;
+        }
+        prefix = left_index + left_char.len_utf8();
+        debug_assert_eq!(prefix, right_index + right_char.len_utf8());
+    }
+    prefix
+}
+
+fn common_suffix_boundary(left: &str, right: &str) -> usize {
+    let mut suffix = 0;
+    for (left_char, right_char) in left.chars().rev().zip(right.chars().rev()) {
+        if left_char != right_char {
+            break;
+        }
+        suffix += left_char.len_utf8();
+    }
+    suffix
+}
+
+fn truncated_notification(text: String) -> String {
+    let mut text = text;
+    truncate_notification(&mut text);
+    text
+}
+
+fn truncate_notification(text: &mut String) {
+    while text.chars().count() > MAX_NOTIFICATION_CHARS {
+        let next = text.chars().next().map_or(0, char::len_utf8);
+        text.drain(..next);
+    }
+}
+
 fn string_to_bstr(value: &str) -> BSTR {
     let wide: Vec<u16> = value.encode_utf16().chain([0]).collect();
     unsafe { windows_sys::Win32::Foundation::SysAllocString(wide.as_ptr()) }
@@ -850,8 +1031,8 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{OBJID_CLIENT, WM_GETOBJECT};
 
     use super::{
-        RawProvider, TerminalProvider, hwnd_from_raw_window_handle, release,
-        should_handle_wm_getobject,
+        RawProvider, TerminalProvider, hwnd_from_raw_window_handle, output_notification_text,
+        release, should_handle_wm_getobject,
     };
 
     #[test]
@@ -876,6 +1057,27 @@ mod tests {
             provider.property_variant_type(UIA_IsTextPattern2AvailablePropertyId),
             Some(VT_BOOL)
         );
+    }
+
+    #[test]
+    fn output_notification_text_reports_inserted_terminal_rows() {
+        let previous = "PS> echo hello";
+        let current = "PS> echo hello\nhello\nPS> ";
+
+        assert_eq!(output_notification_text(previous, current).as_deref(), Some("hello\nPS>"));
+    }
+
+    #[test]
+    fn output_notification_text_ignores_single_line_typing() {
+        assert_eq!(output_notification_text("PS> ech", "PS> echo"), None);
+    }
+
+    #[test]
+    fn output_notification_text_handles_scrolled_viewport() {
+        let previous = "first\nsecond\nthird";
+        let current = "second\nthird\nfourth";
+
+        assert_eq!(output_notification_text(previous, current).as_deref(), Some("fourth"));
     }
 
     #[test]
