@@ -71,35 +71,44 @@ mod tests {
 
         throttle.record_snapshot_change(true, true, true, Some("first".to_owned()));
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(30), &mut sink);
-        assert_eq!(sink.events, [
-            UIA_Text_TextChangedEventId,
-            UIA_Text_TextSelectionChangedEventId,
-            UIA_NotificationEventId
-        ]);
+        assert_eq!(
+            sink.events,
+            [
+                UIA_Text_TextChangedEventId,
+                UIA_Text_TextSelectionChangedEventId,
+                UIA_NotificationEventId
+            ]
+        );
         assert_eq!(sink.active_text_position_events, 1);
         assert_eq!(sink.notifications, ["first"]);
 
         throttle.record_snapshot_change(true, true, true, Some("second".to_owned()));
         throttle.record_snapshot_change(true, true, true, Some("third".to_owned()));
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(60), &mut sink);
-        assert_eq!(sink.events, [
-            UIA_Text_TextChangedEventId,
-            UIA_Text_TextSelectionChangedEventId,
-            UIA_NotificationEventId,
-            UIA_NotificationEventId,
-        ]);
-        assert_eq!(sink.active_text_position_events, 1);
+        assert_eq!(
+            sink.events,
+            [
+                UIA_Text_TextChangedEventId,
+                UIA_Text_TextSelectionChangedEventId,
+                UIA_NotificationEventId,
+                UIA_NotificationEventId,
+            ]
+        );
+        assert_eq!(sink.active_text_position_events, 2);
         assert_eq!(sink.notifications, ["first", "second\nthird"]);
 
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(105), &mut sink);
-        assert_eq!(sink.events, [
-            UIA_Text_TextChangedEventId,
-            UIA_Text_TextSelectionChangedEventId,
-            UIA_NotificationEventId,
-            UIA_NotificationEventId,
-            UIA_Text_TextChangedEventId,
-            UIA_Text_TextSelectionChangedEventId,
-        ]);
+        assert_eq!(
+            sink.events,
+            [
+                UIA_Text_TextChangedEventId,
+                UIA_Text_TextSelectionChangedEventId,
+                UIA_NotificationEventId,
+                UIA_NotificationEventId,
+                UIA_Text_TextChangedEventId,
+                UIA_Text_TextSelectionChangedEventId,
+            ]
+        );
         assert_eq!(sink.active_text_position_events, 2);
         assert_eq!(sink.notifications, ["first", "second\nthird"]);
     }
@@ -120,11 +129,30 @@ mod tests {
         throttle.record_snapshot_change(false, true, true, None);
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(150), &mut sink);
 
-        assert_eq!(sink.events, [
-            UIA_Text_TextChangedEventId,
-            UIA_Text_TextSelectionChangedEventId
-        ]);
+        assert_eq!(
+            sink.events,
+            [UIA_Text_TextChangedEventId, UIA_Text_TextSelectionChangedEventId]
+        );
         assert_eq!(sink.active_text_position_events, 1);
+    }
+
+    #[test]
+    fn emits_caret_only_change_immediately_inside_throttle_interval() {
+        let start = Instant::now();
+        let mut throttle = UiaEventThrottle::new(Duration::from_millis(75), start);
+        let mut sink = RecordingSink {
+            listening: true,
+            events: Vec::new(),
+            active_text_position_events: 0,
+            notifications: Vec::new(),
+        };
+
+        throttle.record_snapshot_change(true, true, true, None);
+        throttle.flush_due(std::ptr::null_mut(), start, &mut sink);
+        throttle.record_snapshot_change(false, true, true, None);
+        throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(10), &mut sink);
+
+        assert_eq!(sink.active_text_position_events, 2);
     }
 
     #[test]
