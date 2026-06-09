@@ -207,6 +207,10 @@ impl UiaEventThrottle {
         }
 
         if self.has_emitted && now.duration_since(self.last_emit) < self.interval {
+            if self.pending_active_text_position {
+                sink.raise_active_text_position_changed(provider);
+                self.pending_active_text_position = false;
+            }
             if let Some(notification) = self.pending_notification.take() {
                 sink.raise_notification(provider, &notification);
             }
@@ -916,6 +920,10 @@ fn output_notification_text(previous: &str, current: &str) -> Option<String> {
         return notification_from_lines(lines);
     }
 
+    if let Some(lines) = rows_replacing_blank_lines(previous, current) {
+        return notification_from_lines(lines);
+    }
+
     let inserted = inserted_text(previous, current)?;
     if !inserted.contains('\n') {
         return None;
@@ -941,6 +949,24 @@ fn inserted_lines<'a>(previous: &str, current: &'a str) -> Option<Vec<&'a str>> 
     }
 
     None
+}
+
+fn rows_replacing_blank_lines<'a>(previous: &str, current: &'a str) -> Option<Vec<&'a str>> {
+    let previous_lines = previous.lines().collect::<Vec<_>>();
+    let current_lines = current.lines().collect::<Vec<_>>();
+    if previous_lines.len() != current_lines.len() {
+        return None;
+    }
+
+    let rows = previous_lines
+        .into_iter()
+        .zip(current_lines)
+        .filter_map(|(previous, current)| {
+            (previous.trim().is_empty() && !current.trim().is_empty()).then_some(current)
+        })
+        .collect::<Vec<_>>();
+
+    (!rows.is_empty()).then_some(rows)
 }
 
 fn notification_from_lines(lines: Vec<&str>) -> Option<String> {
@@ -1065,6 +1091,22 @@ mod tests {
         let current = "PS> echo hello\nhello\nPS> ";
 
         assert_eq!(output_notification_text(previous, current).as_deref(), Some("hello\nPS>"));
+    }
+
+    #[test]
+    fn output_notification_text_reports_rows_inserted_before_blank_viewport_tail() {
+        let previous = "PS> echo foobar\n\n\n";
+        let current = "PS> echo foobar\nfoobar\nPS> \n\n\n";
+
+        assert_eq!(output_notification_text(previous, current).as_deref(), Some("foobar\nPS>"));
+    }
+
+    #[test]
+    fn output_notification_text_reports_single_output_row_replacing_blank_line() {
+        let previous = "PS> echo foobar\n\n\n";
+        let current = "PS> echo foobar\nfoobar\n\n";
+
+        assert_eq!(output_notification_text(previous, current).as_deref(), Some("foobar"));
     }
 
     #[test]

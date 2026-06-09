@@ -732,7 +732,11 @@ unsafe extern "system" fn text_range_expand_to_enclosing_unit(
         range.start = start;
         range.end = next_char_boundary(&range.text, start);
     } else if unit == TextUnit_Word {
-        let (start, end) = word_bounds(&range.text, range.start);
+        let (start, end) = if range.start == range.end {
+            caret_word_bounds(&range.text, range.start)
+        } else {
+            word_bounds(&range.text, range.start)
+        };
         range.start = start;
         range.end = end;
     } else if is_terminal_line_unit(unit) {
@@ -1071,7 +1075,7 @@ fn word_starts(text: &str) -> Vec<usize> {
     let mut starts = Vec::new();
     let mut in_word = false;
     for (index, character) in text.char_indices() {
-        if character.is_alphanumeric() || character == '_' {
+        if is_word_character(character) {
             if !in_word {
                 starts.push(index);
                 in_word = true;
@@ -1101,39 +1105,58 @@ fn offset_for_line_column(text: &str, row: usize, column: usize) -> usize {
         .map_or(line_end, |(index, _)| line_start + index)
 }
 
+fn caret_word_bounds(text: &str, offset: usize) -> (usize, usize) {
+    let offset = previous_char_boundary(text, offset.min(text.len()));
+    if offset < text.len()
+        && !text[offset..].chars().next().is_some_and(is_word_character)
+        && offset > 0
+    {
+        let previous = previous_char_boundary(text, offset - 1);
+        if text[previous..offset].chars().next().is_some_and(is_word_character)
+            && let Some(next_word) =
+                text[offset..].char_indices().find(|(_, character)| is_word_character(*character))
+        {
+            return word_bounds(text, offset + next_word.0);
+        }
+    }
+
+    word_bounds(text, offset)
+}
+
 fn word_bounds(text: &str, offset: usize) -> (usize, usize) {
     let offset = previous_char_boundary(text, offset.min(text.len()));
     let mut start = offset;
     while start > 0 {
         let previous = previous_char_boundary(text, start - 1);
         let character = text[previous..start].chars().next().unwrap();
-        if !(character.is_alphanumeric() || character == '_') {
+        if !is_word_character(character) {
             break;
         }
         start = previous;
     }
 
     if start == offset
-        && text[start..]
-            .chars()
-            .next()
-            .is_none_or(|character| !(character.is_alphanumeric() || character == '_'))
+        && text[start..].chars().next().is_none_or(|character| !is_word_character(character))
     {
         start = text[offset..]
             .char_indices()
-            .find(|(_, character)| character.is_alphanumeric() || *character == '_')
+            .find(|(_, character)| is_word_character(*character))
             .map_or(text.len(), |(index, _)| offset + index);
     }
 
     let mut end = start;
     for (index, character) in text[start..].char_indices() {
-        if !(character.is_alphanumeric() || character == '_') {
+        if !is_word_character(character) {
             break;
         }
         end = start + index + character.len_utf8();
     }
 
     (start, end)
+}
+
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 fn previous_char_boundary(text: &str, mut offset: usize) -> usize {

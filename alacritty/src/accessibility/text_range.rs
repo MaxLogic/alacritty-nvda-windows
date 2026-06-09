@@ -334,6 +334,124 @@ mod tests {
     }
 
     #[test]
+    fn move_by_word_from_word_end_advances_to_next_word() {
+        unsafe {
+            let (provider, range) = document_range("alpha beta gamma");
+            let provider_vtable =
+                (*(provider as *mut crate::accessibility::text_pattern::RawTextProvider)).vtable;
+            let range_vtable =
+                *(range as *mut &'static crate::accessibility::text_pattern::RawTextRangeVtable);
+            let mut moved = 0;
+
+            assert_eq!(
+                (range_vtable.move_endpoint_by_unit)(
+                    range,
+                    TextPatternRangeEndpoint_Start,
+                    TextUnit_Character,
+                    5,
+                    &mut moved,
+                ),
+                0,
+            );
+            assert_eq!(
+                (range_vtable.move_endpoint_by_unit)(
+                    range,
+                    TextPatternRangeEndpoint_End,
+                    TextUnit_Character,
+                    -11,
+                    &mut moved,
+                ),
+                0,
+            );
+            assert_eq!(range_text(range), "");
+            assert_eq!((range_vtable.move_range)(range, TextUnit_Word, 1, &mut moved), 0);
+            assert_eq!(moved, 1);
+            assert_eq!(range_text(range), "beta");
+
+            release_range(range);
+            (provider_vtable.release)(provider);
+        }
+    }
+
+    #[test]
+    fn expand_collapsed_word_range_at_word_end_selects_word_ahead() {
+        unsafe {
+            let (provider, range) = document_range("word1 word2");
+            let provider_vtable =
+                (*(provider as *mut crate::accessibility::text_pattern::RawTextProvider)).vtable;
+            let range_vtable =
+                *(range as *mut &'static crate::accessibility::text_pattern::RawTextRangeVtable);
+            let mut moved = 0;
+
+            assert_eq!(
+                (range_vtable.move_endpoint_by_unit)(
+                    range,
+                    TextPatternRangeEndpoint_Start,
+                    TextUnit_Character,
+                    5,
+                    &mut moved,
+                ),
+                0,
+            );
+            assert_eq!(
+                (range_vtable.move_endpoint_by_unit)(
+                    range,
+                    TextPatternRangeEndpoint_End,
+                    TextUnit_Character,
+                    -6,
+                    &mut moved,
+                ),
+                0,
+            );
+            assert_eq!(range_text(range), "");
+            assert_eq!((range_vtable.expand_to_enclosing_unit)(range, TextUnit_Word), 0);
+            assert_eq!(range_text(range), "word2");
+
+            release_range(range);
+            (provider_vtable.release)(provider);
+        }
+    }
+
+    #[test]
+    fn expand_collapsed_word_range_before_comma_selects_word_ahead() {
+        unsafe {
+            let (provider, range) = document_range("word1, word2");
+            let provider_vtable =
+                (*(provider as *mut crate::accessibility::text_pattern::RawTextProvider)).vtable;
+            let range_vtable =
+                *(range as *mut &'static crate::accessibility::text_pattern::RawTextRangeVtable);
+            let mut moved = 0;
+
+            assert_eq!(
+                (range_vtable.move_endpoint_by_unit)(
+                    range,
+                    TextPatternRangeEndpoint_Start,
+                    TextUnit_Character,
+                    5,
+                    &mut moved,
+                ),
+                0,
+            );
+            assert_eq!(
+                (range_vtable.move_endpoint_by_unit)(
+                    range,
+                    TextPatternRangeEndpoint_End,
+                    TextUnit_Character,
+                    -7,
+                    &mut moved,
+                ),
+                0,
+            );
+            assert_eq!(range_text(range), "");
+            assert_eq!((range_vtable.expand_to_enclosing_unit)(range, TextUnit_Word), 0);
+            assert_eq!(range_text(range), "word2");
+
+            release_range(range);
+            (provider_vtable.release)(provider);
+        }
+    }
+
+    #[test]
     fn move_endpoint_by_word_from_inside_word_advances_to_next_word() {
         unsafe {
             let (provider, range) = document_range("alpha beta gamma");
