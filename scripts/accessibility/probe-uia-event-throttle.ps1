@@ -3,6 +3,7 @@ param(
     [string]$TitlePattern = "*",
     [int]$ObservationSeconds = 3,
     [int]$MaxTextChangedEvents = 90,
+    [int]$MaxNotificationEvents = 90,
     [string]$TracePath = ""
 )
 
@@ -52,10 +53,12 @@ if (-not $window.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::P
 }
 
 $script:TextChangedEvents = 0
-$traceEventsBefore = 0
+$traceLinesBefore = @()
 if (-not [string]::IsNullOrEmpty($TracePath) -and (Test-Path -LiteralPath $TracePath)) {
-    $traceEventsBefore = @(Get-Content -LiteralPath $TracePath).Count
+    $traceLinesBefore = @(Get-Content -LiteralPath $TracePath)
 }
+$traceTextEventsBefore = @($traceLinesBefore | Where-Object { $_ -eq "20015" }).Count
+$traceNotificationEventsBefore = @($traceLinesBefore | Where-Object { $_ -eq "20035" }).Count
 
 $handler = [System.Windows.Automation.AutomationEventHandler]{
     param($sender, $eventArgs)
@@ -85,20 +88,18 @@ if ($beforeText -eq $afterText) {
     Write-Error "Document text did not change during the observation window."
 }
 
-$traceEvents = @()
+$traceLines = @()
 if (-not [string]::IsNullOrEmpty($TracePath) -and (Test-Path -LiteralPath $TracePath)) {
-    $traceEvents = @(Get-Content -LiteralPath $TracePath | Where-Object { $_ -eq "20015" })
+    $traceLines = @(Get-Content -LiteralPath $TracePath)
 }
 
-$traceTextEventsBefore = 0
-if (-not [string]::IsNullOrEmpty($TracePath) -and (Test-Path -LiteralPath $TracePath)) {
-    $traceTextEventsBefore = @(
-        (Get-Content -LiteralPath $TracePath | Select-Object -First $traceEventsBefore) |
-            Where-Object { $_ -eq "20015" }
-    ).Count
-}
-
-$traceEventsObserved = [Math]::Max(0, $traceEvents.Count - $traceTextEventsBefore)
+$traceTextEvents = @($traceLines | Where-Object { $_ -eq "20015" })
+$traceNotificationEvents = @($traceLines | Where-Object { $_ -eq "20035" })
+$traceEventsObserved = [Math]::Max(0, $traceTextEvents.Count - $traceTextEventsBefore)
+$traceNotificationEventsObserved = [Math]::Max(
+    0,
+    $traceNotificationEvents.Count - $traceNotificationEventsBefore
+)
 $observedEvents = [Math]::Max($script:TextChangedEvents, $traceEventsObserved)
 
 if ($observedEvents -le 0) {
@@ -107,6 +108,10 @@ if ($observedEvents -le 0) {
 
 if ($observedEvents -gt $MaxTextChangedEvents) {
     Write-Error "Observed $observedEvents TextChanged events; expected at most $MaxTextChangedEvents."
+}
+
+if ($traceNotificationEventsObserved -gt $MaxNotificationEvents) {
+    Write-Error "Observed $traceNotificationEventsObserved Notification events; expected at most $MaxNotificationEvents."
 }
 
 Write-Output "Event coalescing: PASS"

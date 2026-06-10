@@ -211,9 +211,6 @@ impl UiaEventThrottle {
                 sink.raise_active_text_position_changed(provider);
                 self.pending_active_text_position = false;
             }
-            if let Some(notification) = self.pending_notification.take() {
-                sink.raise_notification(provider, &notification);
-            }
             return;
         }
 
@@ -496,6 +493,9 @@ impl WindowsAccessibility {
 impl Drop for WindowsAccessibility {
     fn drop(&mut self) {
         unsafe {
+            // SAFETY: `provider` and the subclass were installed together in `new` for this
+            // HWND. Dropping `WindowsAccessibility` disconnects UIA and removes the subclass
+            // before releasing the owning COM reference.
             UiaDisconnectProvider(self.raw_provider());
             RemoveWindowSubclass(self.hwnd, Some(accessibility_subclass_proc), SUBCLASS_ID);
             release(self.raw_provider());
@@ -528,6 +528,9 @@ unsafe extern "system" fn accessibility_subclass_proc(
         let provider = ref_data as *mut RawProvider;
         if !provider.is_null() {
             return unsafe {
+                // SAFETY: `ref_data` is the `RawProvider` pointer passed to
+                // `SetWindowSubclass` in `WindowsAccessibility::new`; the subclass is removed
+                // before the provider reference is released.
                 UiaReturnRawElementProvider(hwnd, wparam, lparam, (*provider).as_raw())
             };
         }
@@ -570,6 +573,8 @@ impl RawProvider {
     fn allocate(hwnd: HWND, provider: TerminalProvider) -> NonNull<Self> {
         let mut provider = Box::new(Self::new(hwnd, provider));
         unsafe {
+            // SAFETY: The leaked `RawProvider` has a stable address for COM callbacks until its
+            // final `Release`; the text provider stores only this raw COM identity pointer.
             provider.set_enclosing_provider();
         }
         provider.set_advise_events_owner();
@@ -597,7 +602,7 @@ impl RawProvider {
 
     unsafe fn set_enclosing_provider(&mut self) {
         unsafe {
-            (*self.text_provider.as_ptr()).enclosing_provider = self.as_raw();
+            (*self.text_provider.as_ptr()).set_enclosing_provider(self.as_raw());
         }
     }
 
@@ -649,6 +654,8 @@ impl RawProvider {
 impl Drop for RawProvider {
     fn drop(&mut self) {
         unsafe {
+            // SAFETY: The raw provider owns one reference to the text provider allocated in
+            // `RawProvider::new`; external UIA clients hold their own AddRef'd references.
             (*self.text_provider.as_ptr()).disconnect_enclosing_provider();
             text_pattern::text_provider_release(self.text_provider.as_ptr().cast());
         }
@@ -662,6 +669,8 @@ impl Drop for RawProvider {
 impl Drop for RawProvider {
     fn drop(&mut self) {
         unsafe {
+            // SAFETY: The raw provider owns one reference to the text provider allocated in
+            // `RawProvider::new`; external UIA clients hold their own AddRef'd references.
             (*self.text_provider.as_ptr()).disconnect_enclosing_provider();
             text_pattern::text_provider_release(self.text_provider.as_ptr().cast());
         }
@@ -752,12 +761,16 @@ unsafe extern "system" fn query_interface(
         *interface = ptr::null_mut();
         if guid_eq(&*iid, &IID_IUNKNOWN) || guid_eq(&*iid, &IID_IRAW_ELEMENT_PROVIDER_SIMPLE) {
             trace_uia("provider.QueryInterface IRawElementProviderSimple");
+            // SAFETY: COM requires a successful QueryInterface result to return an AddRef'd
+            // interface pointer. `this` is the object identity for IUnknown and Simple.
             add_ref(this);
             *interface = this;
             S_OK
         } else if guid_eq(&*iid, &IID_IRAW_ELEMENT_PROVIDER_ADVISE_EVENTS) {
             trace_uia("provider.QueryInterface IRawElementProviderAdviseEvents");
             let provider = &*(this as *const RawProvider);
+            // SAFETY: `advise_events` is embedded in `RawProvider`; AddRef is applied to the
+            // owning object and Release for the embedded interface delegates back to it.
             add_ref(this);
             *interface = provider.advise_events.as_raw();
             S_OK
@@ -780,6 +793,8 @@ unsafe extern "system" fn release(this: *mut c_void) -> u32 {
     if remaining == 0 {
         std::sync::atomic::fence(Ordering::Acquire);
         unsafe {
+            // SAFETY: The COM refcount reached zero, so no outstanding COM references may
+            // legally use this allocation after Release returns.
             drop(Box::from_raw(this as *mut RawProvider));
         }
     }
@@ -1079,11 +1094,7 @@ fn accessibility_cursor(
 ) -> Point<usize> {
     let should_preserve_previous =
         !cursor_visible || is_codex_status_footer_cursor(raw_cursor, cursor_row_text);
-    if should_preserve_previous {
-        previous_cursor.unwrap_or(raw_cursor)
-    } else {
-        raw_cursor
-    }
+    if should_preserve_previous { previous_cursor.unwrap_or(raw_cursor) } else { raw_cursor }
 }
 
 fn published_selection_changed(
@@ -1216,9 +1227,8 @@ mod tests {
     fn accessibility_cursor_preserves_previous_caret_for_codex_status_footer() {
         let previous = Point::new(19, Column(13));
         let footer_cursor = Point::new(22, Column(102));
-        let footer = "  gpt-5.5 medium \u{00b7} F:\\projects\\MaxLogic\\alacritty \
-                      \u{00b7} Context 100% left \u{00b7} weekly 55% left \
-                      \u{00b7} 0 in \u{00b7} 0 out";
+        let footer = "  gpt-5.5 medium \u{00b7} F:\\projects\\MaxLogic\\alacritty \u{00b7} \
+                      Context 100% left \u{00b7} weekly 55% left \u{00b7} 0 in \u{00b7} 0 out";
 
         assert_eq!(accessibility_cursor(footer_cursor, true, footer, Some(previous)), previous);
     }
