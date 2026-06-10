@@ -20,6 +20,8 @@ pub struct Colors {
     pub hints: HintColors,
     pub transparent_background_colors: bool,
     pub draw_bold_text_with_bright_colors: bool,
+    pub ignore_reverse_video: bool,
+    pub force_primary_colors: bool,
     footer_bar: BarColors,
 }
 

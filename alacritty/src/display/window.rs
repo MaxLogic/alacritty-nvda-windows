@@ -39,8 +39,14 @@ use winit::window::{
     WindowAttributes, WindowId,
 };
 
+#[cfg(windows)]
+use alacritty_terminal::event::EventListener;
 use alacritty_terminal::index::Point;
+#[cfg(windows)]
+use alacritty_terminal::term::Term;
 
+#[cfg(windows)]
+use crate::accessibility::windows_provider::{WindowsAccessibility, hwnd_from_raw_window_handle};
 use crate::cli::WindowOptions;
 use crate::config::UiConfig;
 use crate::config::window::{Decorations, Identity, WindowConfig};
@@ -113,6 +119,8 @@ pub struct Window {
     /// Hold the window when terminal exits.
     pub hold: bool,
 
+    #[cfg(windows)]
+    _accessibility: Option<WindowsAccessibility>,
     window: WinitWindow,
 
     /// Current window title.
@@ -201,7 +209,13 @@ impl Window {
 
         let scale_factor = window.scale_factor();
         log::info!("Window scale factor: {scale_factor}");
-        let is_x11 = matches!(window.window_handle().unwrap().as_raw(), RawWindowHandle::Xlib(_));
+        let raw_window_handle = window.window_handle().unwrap().as_raw();
+        let is_x11 = matches!(raw_window_handle, RawWindowHandle::Xlib(_));
+        #[cfg(windows)]
+        let accessibility = hwnd_from_raw_window_handle(raw_window_handle)
+            // SAFETY: The HWND belongs to the `WinitWindow` stored in this `Window`, and the
+            // `_accessibility` field is declared before `window` so it is dropped first.
+            .and_then(|hwnd| unsafe { WindowsAccessibility::new(hwnd, identity.title.clone()) });
 
         Ok(Self {
             hold: options.terminal_options.hold,
@@ -211,6 +225,8 @@ impl Window {
             mouse_visible: true,
             has_frame: true,
             scale_factor,
+            #[cfg(windows)]
+            _accessibility: accessibility,
             window,
             is_x11,
             ime_inhibitor: Default::default(),
@@ -248,6 +264,13 @@ impl Window {
     pub fn set_title(&mut self, title: String) {
         self.title = title;
         self.window.set_title(&self.title);
+    }
+
+    #[cfg(windows)]
+    pub fn update_accessibility_snapshot<T: EventListener>(&self, term: &Term<T>, size: &SizeInfo) {
+        if let Some(accessibility) = &self._accessibility {
+            accessibility.update_snapshot(term, size);
+        }
     }
 
     /// Get the window title.
