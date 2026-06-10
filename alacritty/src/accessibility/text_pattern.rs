@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use alacritty_terminal::index::Point;
 use windows_sys::Win32::Foundation::{BOOL, E_FAIL, HWND, S_OK, SysAllocStringLen};
@@ -52,7 +52,7 @@ pub struct RawTextProvider {
     ref_count: AtomicU32,
     state: RwLock<TextProviderState>,
     hwnd: HWND,
-    pub(crate) enclosing_provider: *mut c_void,
+    enclosing_provider: AtomicPtr<c_void>,
 }
 
 #[derive(Clone, Debug)]
@@ -160,7 +160,7 @@ impl RawTextProvider {
             ref_count: AtomicU32::new(1),
             state: RwLock::new(TextProviderState::from_text(text)),
             hwnd,
-            enclosing_provider,
+            enclosing_provider: AtomicPtr::new(enclosing_provider),
         });
         NonNull::from(Box::leak(provider))
     }
@@ -215,8 +215,18 @@ impl RawTextProvider {
         state.selection = ranges;
     }
 
-    pub(crate) fn disconnect_enclosing_provider(&mut self) {
-        self.enclosing_provider = ptr::null_mut();
+    pub(crate) fn set_enclosing_provider(&self, provider: *mut c_void) {
+        self.enclosing_provider.store(provider, Ordering::Release);
+    }
+
+    pub(crate) fn disconnect_enclosing_provider(&self) {
+        self.set_enclosing_provider(ptr::null_mut());
+    }
+
+    fn enclosing_provider(&self) -> *mut c_void {
+        // The enclosing provider pointer is cleared when the owner disconnects. Atomic access
+        // avoids racing UIA callbacks that still hold an AddRef'd text provider.
+        self.enclosing_provider.load(Ordering::Acquire)
     }
 
     fn text(&self) -> String {
@@ -249,7 +259,7 @@ impl RawTextProvider {
         let state = self.state.read().expect("text provider lock poisoned");
         let offset = state.cursor_offset();
         trace_uia(&format!("text_provider.GetCaretRange offset={offset}"));
-        RawTextRange::allocate(state.text.clone(), offset, offset, self.enclosing_provider)
+        RawTextRange::allocate(state.text.clone(), offset, offset, self.enclosing_provider())
             .as_ptr()
             .cast()
     }
@@ -304,11 +314,13 @@ unsafe extern "system" fn text_provider_query_interface(
         *interface = ptr::null_mut();
         if guid_eq(&*iid, &IID_IUNKNOWN) || guid_eq(&*iid, &IID_ITEXT_PROVIDER) {
             trace_uia("text_provider.QueryInterface ITextProvider");
+            // SAFETY: A successful COM QueryInterface must return an AddRef'd interface pointer.
             text_provider_add_ref(this);
             *interface = this;
             S_OK
         } else if guid_eq(&*iid, &IID_ITEXT_PROVIDER2) {
             trace_uia("text_provider.QueryInterface ITextProvider2");
+            // SAFETY: ITextProvider2 is implemented by the same allocation and COM identity.
             text_provider_add_ref(this);
             *interface = this;
             S_OK
@@ -331,6 +343,7 @@ pub(crate) unsafe extern "system" fn text_provider_release(this: *mut c_void) ->
     if remaining == 0 {
         std::sync::atomic::fence(Ordering::Acquire);
         unsafe {
+            // SAFETY: The text provider COM refcount reached zero, so this is the final release.
             drop(Box::from_raw(this as *mut RawTextProvider));
         }
     }
@@ -362,9 +375,11 @@ unsafe extern "system" fn text_provider_get_selection(
             text.clone(),
             clamp_to_boundary(&text, start),
             clamp_to_boundary(&text, end),
-            provider.enclosing_provider,
+            provider.enclosing_provider(),
         );
         let index = index as i32;
+        // SAFETY: The SAFEARRAY stores VT_UNKNOWN interface pointers. `SafeArrayPutElement`
+        // AddRefs the supplied COM object, so the local range reference is released below.
         if unsafe { SafeArrayPutElement(array, &index, range.as_ptr().cast::<c_void>()) } != S_OK {
             unsafe {
                 text_range_release(range.as_ptr().cast());
@@ -395,7 +410,9 @@ unsafe extern "system" fn text_provider_get_visible_ranges(
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let text = provider.text();
     let end = text.len();
-    let range = RawTextRange::allocate(text, 0, end, provider.enclosing_provider);
+    let range = RawTextRange::allocate(text, 0, end, provider.enclosing_provider());
+    // SAFETY: `single_unknown_safearray` stores the AddRef'd COM range in a VT_UNKNOWN SAFEARRAY;
+    // the local reference is released immediately after the array takes its reference.
     let array = unsafe { single_unknown_safearray(range.as_ptr().cast()) };
     unsafe {
         text_range_release(range.as_ptr().cast());
@@ -430,7 +447,7 @@ unsafe extern "system" fn text_provider_range_from_point(
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let (text, offset) = provider.range_from_point(point);
     trace_uia(&format!("text_provider.RangeFromPoint offset={offset}"));
-    let text_range = RawTextRange::allocate(text, offset, offset, provider.enclosing_provider);
+    let text_range = RawTextRange::allocate(text, offset, offset, provider.enclosing_provider());
     unsafe { *range = text_range.as_ptr().cast() };
     S_OK
 }
@@ -447,7 +464,7 @@ unsafe extern "system" fn text_provider_document_range(
     let text = provider.text();
     trace_uia(&format!("text_provider.DocumentRange len={}", text.len()));
     let text_range =
-        RawTextRange::allocate(text.clone(), 0, text.len(), provider.enclosing_provider);
+        RawTextRange::allocate(text.clone(), 0, text.len(), provider.enclosing_provider());
     unsafe { *range = text_range.as_ptr().cast() };
     S_OK
 }
@@ -513,6 +530,8 @@ impl RawTextRange {
         enclosing_provider: *mut c_void,
     ) -> NonNull<Self> {
         unsafe {
+            // SAFETY: Each text range keeps the enclosing provider alive while clients can ask
+            // for its enclosing element.
             add_ref_raw_provider(enclosing_provider);
         }
         let range = Box::new(Self {
@@ -543,6 +562,7 @@ impl RawTextRange {
 impl Drop for RawTextRange {
     fn drop(&mut self) {
         unsafe {
+            // SAFETY: This balances the AddRef in `RawTextRange::allocate`.
             release_raw_provider(self.enclosing_provider);
         }
     }
@@ -639,6 +659,7 @@ unsafe extern "system" fn text_range_query_interface(
         *interface = ptr::null_mut();
         if guid_eq(&*iid, &IID_IUNKNOWN) || guid_eq(&*iid, &IID_ITEXT_RANGE_PROVIDER) {
             trace_uia("text_range.QueryInterface ITextRangeProvider");
+            // SAFETY: A successful COM QueryInterface must return an AddRef'd interface pointer.
             text_range_add_ref(this);
             *interface = this;
             S_OK
@@ -661,6 +682,7 @@ pub(crate) unsafe extern "system" fn text_range_release(this: *mut c_void) -> u3
     if remaining == 0 {
         std::sync::atomic::fence(Ordering::Acquire);
         unsafe {
+            // SAFETY: The text range COM refcount reached zero, so this is the final release.
             drop(Box::from_raw(this as *mut RawTextRange));
         }
     }
@@ -995,6 +1017,8 @@ unsafe fn single_unknown_safearray(value: *mut c_void) -> *mut SAFEARRAY {
 
     let _ = unsafe { SafeArraySetIID(array, &IID_IUNKNOWN) };
     let index = 0;
+    // SAFETY: The SAFEARRAY stores VT_UNKNOWN interface pointers. `SafeArrayPutElement` AddRefs
+    // the supplied COM object on success.
     if unsafe { SafeArrayPutElement(array, &index, value as *const c_void) } != S_OK {
         unsafe {
             SafeArrayDestroy(array);

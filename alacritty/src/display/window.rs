@@ -213,6 +213,8 @@ impl Window {
         let is_x11 = matches!(raw_window_handle, RawWindowHandle::Xlib(_));
         #[cfg(windows)]
         let accessibility = hwnd_from_raw_window_handle(raw_window_handle)
+            // SAFETY: The HWND belongs to the `WinitWindow` stored in this `Window`, and the
+            // `_accessibility` field is declared before `window` so it is dropped first.
             .and_then(|hwnd| unsafe { WindowsAccessibility::new(hwnd, identity.title.clone()) });
 
         Ok(Self {
