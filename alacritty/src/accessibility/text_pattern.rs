@@ -6,6 +6,7 @@ use std::ptr::NonNull;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use alacritty_terminal::index::Point;
 use windows_sys::Win32::Foundation::{BOOL, E_FAIL, HWND, S_OK, SysAllocStringLen};
 use windows_sys::Win32::System::Com::SAFEARRAY;
 use windows_sys::Win32::System::Ole::{
@@ -60,19 +61,27 @@ struct TextProviderState {
     terminal: Option<VisibleTerminalSnapshot>,
     layout: Option<TextProviderLayout>,
     selection: Vec<(usize, usize)>,
+    cursor: Option<Point<usize>>,
 }
 
 impl TextProviderState {
     fn from_text(text: String) -> Self {
-        Self { text, terminal: None, layout: None, selection: Vec::new() }
+        Self { text, terminal: None, layout: None, selection: Vec::new(), cursor: None }
     }
 
     fn from_terminal(
         snapshot: VisibleTerminalSnapshot,
         layout: Option<TextProviderLayout>,
         selection: Vec<(usize, usize)>,
+        cursor: Point<usize>,
     ) -> Self {
-        Self { text: snapshot.text().to_owned(), terminal: Some(snapshot), layout, selection }
+        Self {
+            text: snapshot.text().to_owned(),
+            terminal: Some(snapshot),
+            layout,
+            selection,
+            cursor: Some(cursor),
+        }
     }
 
     fn offset_for_point(&self, row: usize, column: usize) -> usize {
@@ -93,7 +102,8 @@ impl TextProviderState {
             return self.text.len();
         };
 
-        snapshot.offset_for_point(snapshot.cursor()).unwrap_or(self.text.len())
+        let cursor = self.cursor.unwrap_or_else(|| snapshot.cursor());
+        snapshot.offset_for_point(cursor).unwrap_or(self.text.len())
     }
 }
 
@@ -160,9 +170,10 @@ impl RawTextProvider {
         snapshot: VisibleTerminalSnapshot,
         layout: Option<TextProviderLayout>,
         selection: Vec<(usize, usize)>,
+        cursor: Point<usize>,
     ) {
         *self.state.write().expect("text provider lock poisoned") =
-            TextProviderState::from_terminal(snapshot, layout, selection);
+            TextProviderState::from_terminal(snapshot, layout, selection, cursor);
     }
 
     #[cfg(test)]
@@ -188,6 +199,7 @@ impl RawTextProvider {
                 rows,
             )),
             Vec::new(),
+            alacritty_terminal::index::Point::new(0, alacritty_terminal::index::Column(0)),
         );
     }
 

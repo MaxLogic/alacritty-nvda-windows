@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::index::Point;
-use alacritty_terminal::term::Term;
+use alacritty_terminal::term::{Term, TermMode};
 use windows_sys::Win32::Foundation::{
     HWND, LPARAM, LRESULT, POINT, RECT, S_OK, SysFreeString, VARIANT_TRUE, WPARAM,
 };
@@ -339,6 +339,8 @@ impl WindowsAccessibility {
     /// `hwnd` must be a valid Alacritty window handle owned by the current UI thread, and the
     /// returned attachment must be dropped before the window is destroyed.
     pub unsafe fn new(hwnd: HWND, name: impl Into<String>) -> Option<Self> {
+        let name = name.into();
+        trace_uia(&format!("accessibility.new hwnd={hwnd:p} name={name:?}"));
         let provider = RawProvider::allocate(hwnd, TerminalProvider::new(name));
         let ref_data = provider.as_ptr() as usize;
         let installed = unsafe {
@@ -346,11 +348,13 @@ impl WindowsAccessibility {
         };
 
         if installed == 0 {
+            trace_uia("accessibility.new SetWindowSubclass failed");
             unsafe {
                 release(provider.as_ptr().cast());
             }
             None
         } else {
+            trace_uia("accessibility.new SetWindowSubclass installed");
             Some(Self {
                 hwnd,
                 provider,
@@ -371,11 +375,23 @@ impl WindowsAccessibility {
         let snapshot = VisibleTerminalSnapshot::from_term(term);
         let layout = self.layout_for_snapshot(&snapshot, size_info);
         let selection = snapshot.selection_offsets(term);
-        let (text_changed, selection_changed, active_text_position_changed, notification) =
-            self.snapshot_changes(snapshot.text().to_owned(), snapshot.cursor(), selection.clone());
+        let raw_cursor = snapshot.cursor();
+        let cursor_visible = term.mode().contains(TermMode::SHOW_CURSOR);
+        let cursor_offset =
+            snapshot.offset_for_point(raw_cursor).unwrap_or_else(|| snapshot.text().len());
+        let cursor_row_text = snapshot.row_text(raw_cursor.line).unwrap_or_default().to_owned();
+        let (cursor, text_changed, selection_changed, active_text_position_changed, notification) =
+            self.snapshot_changes(
+                snapshot.text().to_owned(),
+                raw_cursor,
+                cursor_visible,
+                cursor_offset,
+                cursor_row_text,
+                selection.clone(),
+            );
         unsafe {
             let provider = &*self.provider.as_ptr();
-            provider.set_terminal_state(snapshot, layout, selection);
+            provider.set_terminal_state(snapshot, layout, selection, cursor);
         }
         self.record_and_flush_events(
             text_changed,
@@ -388,21 +404,41 @@ impl WindowsAccessibility {
     fn snapshot_changes(
         &self,
         text: String,
-        cursor: Point<usize>,
+        raw_cursor: Point<usize>,
+        cursor_visible: bool,
+        cursor_offset: usize,
+        cursor_row_text: String,
         selection: Vec<(usize, usize)>,
-    ) -> (bool, bool, bool, Option<String>) {
+    ) -> (Point<usize>, bool, bool, bool, Option<String>) {
         let mut last_snapshot =
             self.last_snapshot.lock().expect("accessibility state lock poisoned");
+        let cursor = accessibility_cursor(
+            raw_cursor,
+            cursor_visible,
+            &cursor_row_text,
+            last_snapshot.as_ref().map(|snapshot| snapshot.cursor),
+        );
+        let cursor_suppressed = cursor != raw_cursor;
         let text_changed = last_snapshot.as_ref().is_none_or(|snapshot| snapshot.text != text);
         let cursor_changed =
             last_snapshot.as_ref().is_none_or(|snapshot| snapshot.cursor != cursor);
         let active_text_position_changed = cursor_changed;
-        let selection_changed = last_snapshot
-            .as_ref()
-            .is_none_or(|snapshot| cursor_changed || snapshot.selection != selection);
+        let selection_changed = published_selection_changed(
+            last_snapshot.as_ref().map(|snapshot| snapshot.selection.as_slice()),
+            &selection,
+        );
         let notification = last_snapshot
             .as_ref()
             .and_then(|snapshot| output_notification_text(&snapshot.text, &text));
+        if text_changed || cursor_changed || selection_changed {
+            trace_uia(&format!(
+                "snapshot.state text_changed={text_changed} cursor_changed={cursor_changed} \
+                 selection_changed={selection_changed} cursor_visible={cursor_visible} \
+                 cursor_suppressed={cursor_suppressed} raw_cursor_row={} raw_cursor_col={} \
+                 cursor_row={} cursor_col={} cursor_offset={} row_text={cursor_row_text:?}",
+                raw_cursor.line, raw_cursor.column.0, cursor.line, cursor.column.0, cursor_offset,
+            ));
+        }
         if let Some(notification) = &notification {
             trace_uia(&format!(
                 "snapshot.notification_candidate len={} text={notification:?}",
@@ -410,7 +446,7 @@ impl WindowsAccessibility {
             ));
         }
         *last_snapshot = Some(PublishedSnapshotState { text, cursor, selection });
-        (text_changed, selection_changed, active_text_position_changed, notification)
+        (cursor, text_changed, selection_changed, active_text_position_changed, notification)
     }
 
     fn record_and_flush_events(
@@ -574,9 +610,10 @@ impl RawProvider {
         snapshot: VisibleTerminalSnapshot,
         layout: Option<TextProviderLayout>,
         selection: Vec<(usize, usize)>,
+        cursor: Point<usize>,
     ) {
         unsafe {
-            (*self.text_provider.as_ptr()).set_terminal_state(snapshot, layout, selection);
+            (*self.text_provider.as_ptr()).set_terminal_state(snapshot, layout, selection, cursor);
         }
     }
 
@@ -1034,6 +1071,40 @@ fn truncate_notification(text: &mut String) {
     }
 }
 
+fn accessibility_cursor(
+    raw_cursor: Point<usize>,
+    cursor_visible: bool,
+    cursor_row_text: &str,
+    previous_cursor: Option<Point<usize>>,
+) -> Point<usize> {
+    let should_preserve_previous =
+        !cursor_visible || is_codex_status_footer_cursor(raw_cursor, cursor_row_text);
+    if should_preserve_previous {
+        previous_cursor.unwrap_or(raw_cursor)
+    } else {
+        raw_cursor
+    }
+}
+
+fn published_selection_changed(
+    previous_selection: Option<&[(usize, usize)]>,
+    selection: &[(usize, usize)],
+) -> bool {
+    previous_selection != Some(selection)
+}
+
+fn is_codex_status_footer_cursor(cursor: Point<usize>, row_text: &str) -> bool {
+    let row_width = row_text.chars().count();
+    let cursor_near_row_end = cursor.column.0.saturating_add(8) >= row_width;
+
+    cursor_near_row_end
+        && row_text.contains(" \u{00b7} ")
+        && row_text.contains(" Context ")
+        && row_text.contains(" left")
+        && row_text.contains(" in ")
+        && row_text.contains(" out")
+}
+
 fn string_to_bstr(value: &str) -> BSTR {
     let wide: Vec<u16> = value.encode_utf16().chain([0]).collect();
     unsafe { windows_sys::Win32::Foundation::SysAllocString(wide.as_ptr()) }
@@ -1057,9 +1128,10 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{OBJID_CLIENT, WM_GETOBJECT};
 
     use super::{
-        RawProvider, TerminalProvider, hwnd_from_raw_window_handle, output_notification_text,
-        release, should_handle_wm_getobject,
+        RawProvider, TerminalProvider, accessibility_cursor, hwnd_from_raw_window_handle,
+        output_notification_text, release, should_handle_wm_getobject,
     };
+    use alacritty_terminal::index::{Column, Point};
 
     #[test]
     fn windows_provider_exposes_terminal_properties() {
@@ -1112,6 +1184,58 @@ mod tests {
     #[test]
     fn output_notification_text_ignores_single_line_typing() {
         assert_eq!(output_notification_text("PS> ech", "PS> echo"), None);
+    }
+
+    #[test]
+    fn accessibility_cursor_tracks_visible_terminal_cursor() {
+        let previous = Point::new(1, Column(5));
+        let raw = Point::new(3, Column(9));
+
+        assert_eq!(accessibility_cursor(raw, true, "shell prompt", Some(previous)), raw);
+    }
+
+    #[test]
+    fn accessibility_cursor_preserves_previous_caret_while_terminal_cursor_is_hidden() {
+        let previous = Point::new(1, Column(5));
+        let hidden_repaint_cursor = Point::new(3, Column(90));
+
+        assert_eq!(
+            accessibility_cursor(hidden_repaint_cursor, false, "shell prompt", Some(previous)),
+            previous
+        );
+    }
+
+    #[test]
+    fn accessibility_cursor_uses_raw_cursor_without_previous_caret() {
+        let raw = Point::new(3, Column(9));
+
+        assert_eq!(accessibility_cursor(raw, false, "shell prompt", None), raw);
+    }
+
+    #[test]
+    fn accessibility_cursor_preserves_previous_caret_for_codex_status_footer() {
+        let previous = Point::new(19, Column(13));
+        let footer_cursor = Point::new(22, Column(102));
+        let footer = "  gpt-5.5 medium \u{00b7} F:\\projects\\MaxLogic\\alacritty \
+                      \u{00b7} Context 100% left \u{00b7} weekly 55% left \
+                      \u{00b7} 0 in \u{00b7} 0 out";
+
+        assert_eq!(accessibility_cursor(footer_cursor, true, footer, Some(previous)), previous);
+    }
+
+    #[test]
+    fn accessibility_cursor_keeps_visible_cursor_on_normal_text_near_row_end() {
+        let previous = Point::new(19, Column(13));
+        let raw = Point::new(20, Column(31));
+        let input = "  test6 test7 test8 test9 test10";
+
+        assert_eq!(accessibility_cursor(raw, true, input, Some(previous)), raw);
+    }
+
+    #[test]
+    fn caret_only_move_does_not_publish_selection_change() {
+        assert!(!super::published_selection_changed(Some(&[]), &[]));
+        assert!(super::published_selection_changed(Some(&[]), &[(1, 4)]));
     }
 
     #[test]
