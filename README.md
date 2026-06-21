@@ -20,9 +20,11 @@ This branch currently adds:
 - High-contrast/monochrome color options useful for accessibility themes.
 - A Windows control-character fallback fix used by terminal applications.
 
-The upstream Alacritty project remains at
-<https://github.com/alacritty/alacritty>. This fork is maintained separately
-for Windows/NVDA compatibility.
+Windows builds are published from this fork's
+[GitHub releases](https://github.com/MaxLogic/alacritty-nvda-windows/releases)
+as a portable executable and MSI installer. The upstream Alacritty project
+remains at <https://github.com/alacritty/alacritty>. This fork is maintained
+separately for Windows/NVDA compatibility.
 
 <p align="center">
   <img alt="Alacritty - A fast, cross-platform, OpenGL terminal emulator"
@@ -41,7 +43,8 @@ The software is considered to be at a **beta** level of readiness; there are
 a few missing features and bugs to be fixed, but it is already used by many as
 a daily driver.
 
-Precompiled binaries are available from the [GitHub releases page](https://github.com/alacritty/alacritty/releases).
+Precompiled Windows/NVDA binaries for this fork are available from the
+[GitHub releases page](https://github.com/MaxLogic/alacritty-nvda-windows/releases).
 
 Join [`#alacritty`] on libera.chat if you have questions or looking for a quick help.
 
