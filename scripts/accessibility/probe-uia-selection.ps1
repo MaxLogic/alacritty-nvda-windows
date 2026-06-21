@@ -1,6 +1,6 @@
 param(
     [string]$ProcessName = "alacritty",
-    [string]$TitlePattern = "*Codex UIA Selection Probe*"
+    [string]$TitlePattern = "*Alacritty UIA Selection Probe*"
 )
 
 $ErrorActionPreference = "Stop"

@@ -27,4 +27,4 @@ del "%ALACRITTY_UIA_DEBUG_TRACE%" "%ALACRITTY_UIA_EVENT_TRACE%" 2>nul
     echo Event trace: %ALACRITTY_UIA_EVENT_TRACE%
 )
 
-start "Codex UIA Trace Launcher" "%ALACRITTY_EXE%" --title "Codex UIA Trace" --working-directory "%REPO_ROOT%"
+start "Alacritty UIA Trace Launcher" "%ALACRITTY_EXE%" --title "Alacritty UIA Trace" --working-directory "%REPO_ROOT%"

@@ -1093,7 +1093,7 @@ fn accessibility_cursor(
     previous_cursor: Option<Point<usize>>,
 ) -> Point<usize> {
     let should_preserve_previous =
-        !cursor_visible || is_codex_status_footer_cursor(raw_cursor, cursor_row_text);
+        !cursor_visible || is_status_footer_cursor(raw_cursor, cursor_row_text);
     if should_preserve_previous { previous_cursor.unwrap_or(raw_cursor) } else { raw_cursor }
 }
 
@@ -1104,7 +1104,7 @@ fn published_selection_changed(
     previous_selection != Some(selection)
 }
 
-fn is_codex_status_footer_cursor(cursor: Point<usize>, row_text: &str) -> bool {
+fn is_status_footer_cursor(cursor: Point<usize>, row_text: &str) -> bool {
     let row_width = row_text.chars().count();
     let cursor_near_row_end = cursor.column.0.saturating_add(8) >= row_width;
 
@@ -1224,10 +1224,10 @@ mod tests {
     }
 
     #[test]
-    fn accessibility_cursor_preserves_previous_caret_for_codex_status_footer() {
+    fn accessibility_cursor_preserves_previous_caret_for_status_footer() {
         let previous = Point::new(19, Column(13));
         let footer_cursor = Point::new(22, Column(102));
-        let footer = "  gpt-5.5 medium \u{00b7} F:\\projects\\MaxLogic\\alacritty \u{00b7} \
+        let footer = "  terminal medium \u{00b7} C:\\work\\alacritty \u{00b7} \
                       Context 100% left \u{00b7} weekly 55% left \u{00b7} 0 in \u{00b7} 0 out";
 
         assert_eq!(accessibility_cursor(footer_cursor, true, footer, Some(previous)), previous);
