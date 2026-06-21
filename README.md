@@ -4,6 +4,26 @@
 
 <h1 align="center">Alacritty - A fast, cross-platform, OpenGL terminal emulator</h1>
 
+## MaxLogic Windows NVDA Compatibility Fork
+
+This fork tracks Alacritty with additional Windows UI Automation support for
+NVDA and other screen readers. The default branch is intended for Windows users
+who need terminal contents, caret movement, selections, and newly printed output
+to be available through UIA text patterns.
+
+This branch currently adds:
+
+- Windows UIA provider support for Alacritty windows.
+- UIA TextPattern/TextPattern2 exposure for visible terminal text.
+- Caret, selection, line/word navigation, and RangeFromPoint support.
+- UIA notifications for newly appearing terminal output.
+- High-contrast/monochrome color options useful for accessibility themes.
+- A Windows control-character fallback fix used by terminal applications.
+
+The upstream Alacritty project remains at
+<https://github.com/alacritty/alacritty>. This fork is maintained separately
+for Windows/NVDA compatibility.
+
 <p align="center">
   <img alt="Alacritty - A fast, cross-platform, OpenGL terminal emulator"
        src="https://raw.githubusercontent.com/alacritty/alacritty/master/extra/promo/alacritty-readme.png">
