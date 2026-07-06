@@ -529,6 +529,7 @@ impl RawTextRange {
         end: usize,
         enclosing_provider: *mut c_void,
     ) -> NonNull<Self> {
+        let (start, end) = normalized_range_bounds(&text, start, end);
         unsafe {
             // SAFETY: Each text range keeps the enclosing provider alive while clients can ask
             // for its enclosing element.
@@ -546,7 +547,8 @@ impl RawTextRange {
     }
 
     fn selected_text(&self, max_length: i32) -> String {
-        let text = &self.text[self.start..self.end];
+        let (start, end) = normalized_range_bounds(&self.text, self.start, self.end);
+        let text = self.text.get(start..end).unwrap_or_default();
         if max_length < 0 {
             text.to_owned()
         } else {
@@ -556,6 +558,24 @@ impl RawTextRange {
 
     fn endpoint_offset(&self, endpoint: TextPatternRangeEndpoint) -> usize {
         if endpoint == TextPatternRangeEndpoint_Start { self.start } else { self.end }
+    }
+
+    fn set_start(&mut self, start: usize) {
+        self.start = clamp_to_boundary(&self.text, start);
+        if self.start > self.end {
+            self.end = self.start;
+        }
+    }
+
+    fn set_end(&mut self, end: usize) {
+        self.end = clamp_to_boundary(&self.text, end);
+        if self.end < self.start {
+            self.start = self.end;
+        }
+    }
+
+    fn set_range(&mut self, start: usize, end: usize) {
+        (self.start, self.end) = normalized_range_bounds(&self.text, start, end);
     }
 }
 
@@ -763,23 +783,19 @@ unsafe extern "system" fn text_range_expand_to_enclosing_unit(
     trace_uia(&format!("text_range.ExpandToEnclosingUnit {unit}"));
     if unit == TextUnit_Character {
         let start = previous_char_boundary(&range.text, range.start);
-        range.start = start;
-        range.end = next_char_boundary(&range.text, start);
+        range.set_range(start, next_char_boundary(&range.text, start));
     } else if unit == TextUnit_Word {
         let (start, end) = if range.start == range.end {
             caret_word_bounds(&range.text, range.start)
         } else {
             word_bounds(&range.text, range.start)
         };
-        range.start = start;
-        range.end = end;
+        range.set_range(start, end);
     } else if is_terminal_line_unit(unit) {
         let (start, end) = line_bounds(&range.text, range.start);
-        range.start = start;
-        range.end = end;
+        range.set_range(start, end);
     } else if unit == TextUnit_Document {
-        range.start = 0;
-        range.end = range.text.len();
+        range.set_range(0, range.text.len());
     }
     S_OK
 }
@@ -896,15 +912,14 @@ unsafe extern "system" fn text_range_move(
     let width = range.end.saturating_sub(range.start);
     let start = normalized_unit_start(&range.text, range.start, unit);
     let (new_start, actual) = move_offset_by_unit(&range.text, start, unit, count);
-    range.start = new_start;
     if unit == TextUnit_Word {
         let (_, end) = word_bounds(&range.text, new_start);
-        range.end = end;
+        range.set_range(new_start, end);
     } else if is_terminal_line_unit(unit) {
         let (_, end) = line_bounds(&range.text, new_start);
-        range.end = end;
+        range.set_range(new_start, end);
     } else {
-        range.end = clamp_to_boundary(&range.text, new_start.saturating_add(width));
+        range.set_range(new_start, new_start.saturating_add(width));
     }
     unsafe { *moved = actual };
     trace_uia(&format!("text_range.Move unit={unit} count={count} moved={actual}"));
@@ -932,15 +947,9 @@ unsafe extern "system" fn text_range_move_endpoint_by_unit(
     let (new_offset, actual) = move_offset_by_unit(&range.text, offset, unit, count);
 
     if endpoint == TextPatternRangeEndpoint_Start {
-        range.start = new_offset;
-        if range.start > range.end {
-            range.end = range.start;
-        }
+        range.set_start(new_offset);
     } else {
-        range.end = new_offset;
-        if range.end < range.start {
-            range.start = range.end;
-        }
+        range.set_end(new_offset);
     }
 
     unsafe { *moved = actual };
@@ -966,15 +975,9 @@ unsafe extern "system" fn text_range_move_endpoint_by_range(
     let target_offset = target.endpoint_offset(target_endpoint);
 
     if endpoint == TextPatternRangeEndpoint_Start {
-        range.start = target_offset;
-        if range.start > range.end {
-            range.end = range.start;
-        }
+        range.set_start(target_offset);
     } else {
-        range.end = target_offset;
-        if range.end < range.start {
-            range.start = range.end;
-        }
+        range.set_end(target_offset);
     }
 
     S_OK
@@ -1125,7 +1128,7 @@ fn word_starts(text: &str) -> Vec<usize> {
 }
 
 fn line_bounds(text: &str, offset: usize) -> (usize, usize) {
-    let offset = offset.min(text.len());
+    let offset = previous_char_boundary(text, offset.min(text.len()));
     let start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
     let end = text[offset..].find('\n').map_or(text.len(), |index| offset + index);
     (start, end)
@@ -1218,6 +1221,16 @@ fn clamp_to_boundary(text: &str, offset: usize) -> usize {
     previous_char_boundary(text, offset.min(text.len()))
 }
 
+fn normalized_range_bounds(text: &str, start: usize, end: usize) -> (usize, usize) {
+    let start = clamp_to_boundary(text, start);
+    let mut end = clamp_to_boundary(text, end);
+    if end < start {
+        end = start;
+    }
+
+    (start, end)
+}
+
 fn string_to_bstr(value: &str) -> BSTR {
     let wide: Vec<u16> = value.encode_utf16().collect();
     unsafe { SysAllocStringLen(wide.as_ptr(), wide.len() as u32) }
@@ -1232,6 +1245,8 @@ fn guid_eq(left: &GUID, right: &GUID) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+
     use windows_sys::Win32::Foundation::{SysFreeString, SysStringLen};
     use windows_sys::Win32::System::Ole::{
         SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetVartype,
@@ -1268,6 +1283,19 @@ mod tests {
             (range_vtable.release)(range);
             (vtable.release)(raw_provider);
         }
+    }
+
+    #[test]
+    fn text_range_clamps_non_boundary_offsets_before_slicing() {
+        let text = "a\u{e9}z".to_owned();
+        let range = super::RawTextRange::allocate(text, 0, 2, ptr::null_mut());
+
+        let selected = std::panic::catch_unwind(|| unsafe { (*range.as_ptr()).selected_text(-1) });
+        unsafe {
+            super::text_range_release(range.as_ptr().cast());
+        }
+
+        assert_eq!(selected.expect("text range selection should not panic"), "a");
     }
 
     #[test]
