@@ -409,6 +409,8 @@ impl ApplicationHandler<Event> for Processor {
             (EventType::Terminal(TerminalEvent::Wakeup), Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     window_context.dirty = true;
+                    #[cfg(windows)]
+                    window_context.update_accessibility_snapshot();
                     if window_context.display.window.has_frame {
                         window_context.display.window.request_redraw();
                     }
@@ -2000,9 +2002,16 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
 
                         // Ensure IME is disabled while unfocused.
                         self.ctx.window().set_ime_inhibitor(ImeInhibitor::FOCUS, !is_focused);
+
+                        if is_focused && *self.ctx.dirty && self.ctx.window().has_frame {
+                            self.ctx.window().force_redraw_request();
+                        }
                     },
                     WindowEvent::Occluded(occluded) => {
                         *self.ctx.occluded = occluded;
+                        if !occluded && *self.ctx.dirty && self.ctx.window().has_frame {
+                            self.ctx.window().force_redraw_request();
+                        }
                     },
                     WindowEvent::DroppedFile(path) => {
                         let path: String = path.to_string_lossy().into();

@@ -390,12 +390,14 @@ impl WindowsAccessibility {
             let provider = &*self.provider.as_ptr();
             provider.set_terminal_state(snapshot, layout, selection, cursor);
         }
-        self.record_and_flush_events(
-            text_changed,
-            selection_changed,
-            active_text_position_changed,
-            notification,
-        );
+        if term.is_focused {
+            self.record_and_flush_events(
+                text_changed,
+                selection_changed,
+                active_text_position_changed,
+                notification,
+            );
+        }
     }
 
     fn snapshot_changes(
