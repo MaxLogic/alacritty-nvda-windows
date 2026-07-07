@@ -364,7 +364,7 @@ impl WindowContext {
 
     /// Draw the window.
     pub fn draw(&mut self, scheduler: &mut Scheduler) {
-        self.display.window.requested_redraw = false;
+        self.display.window.clear_redraw_request();
 
         if self.occluded {
             return;
@@ -395,6 +395,13 @@ impl WindowContext {
             &self.config,
             &mut self.search_state,
         );
+    }
+
+    /// Update Windows accessibility state from the current terminal contents.
+    #[cfg(windows)]
+    pub fn update_accessibility_snapshot(&mut self) {
+        let terminal = self.terminal.lock();
+        self.display.window.update_accessibility_snapshot(&terminal, &self.display.size_info);
     }
 
     /// Process events for this terminal window.

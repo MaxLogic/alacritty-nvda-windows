@@ -19,6 +19,7 @@ use {
 };
 
 use std::fmt::{self, Display, Formatter};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use {
@@ -59,6 +60,8 @@ const WINDOW_ICON: &[u8] = include_bytes!("../../extra/logo/compat/alacritty-ter
 /// This should match the definition of IDI_ICON from `alacritty.rc`.
 #[cfg(windows)]
 const IDI_ICON: u16 = 0x101;
+
+const REDRAW_REQUEST_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 /// Window errors.
 #[derive(Debug)]
@@ -115,6 +118,9 @@ pub struct Window {
 
     /// Flag indicating whether redraw was requested.
     pub requested_redraw: bool,
+
+    /// Time at which the last redraw request was submitted.
+    requested_redraw_at: Option<Instant>,
 
     /// Hold the window when terminal exits.
     pub hold: bool,
@@ -220,6 +226,7 @@ impl Window {
         Ok(Self {
             hold: options.terminal_options.hold,
             requested_redraw: false,
+            requested_redraw_at: None,
             title: identity.title,
             current_mouse_cursor,
             mouse_visible: true,
@@ -281,10 +288,29 @@ impl Window {
 
     #[inline]
     pub fn request_redraw(&mut self) {
-        if !self.requested_redraw {
+        let now = Instant::now();
+        let should_request = !self.requested_redraw
+            || self.requested_redraw_at.is_some_and(|requested_at| {
+                now.saturating_duration_since(requested_at) >= REDRAW_REQUEST_RETRY_DELAY
+            });
+
+        if should_request {
             self.requested_redraw = true;
+            self.requested_redraw_at = Some(now);
             self.window.request_redraw();
         }
+    }
+
+    #[inline]
+    pub fn clear_redraw_request(&mut self) {
+        self.requested_redraw = false;
+        self.requested_redraw_at = None;
+    }
+
+    #[inline]
+    pub fn force_redraw_request(&mut self) {
+        self.clear_redraw_request();
+        self.request_redraw();
     }
 
     #[inline]
