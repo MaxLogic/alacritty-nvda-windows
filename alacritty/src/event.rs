@@ -251,6 +251,10 @@ impl Processor {
 
     /// Check if an event is irrelevant and can be skipped.
     fn skip_window_event(event: &WindowEvent) -> bool {
+        if cfg!(windows) && matches!(event, WindowEvent::Moved(_)) {
+            return false;
+        }
+
         matches!(
             event,
             WindowEvent::KeyboardInput { is_synthetic: true, .. }
@@ -452,6 +456,8 @@ impl ApplicationHandler<Event> for Processor {
             },
             (EventType::Terminal(TerminalEvent::Wakeup), Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
+                    #[cfg(windows)]
+                    window_context.update_accessibility_snapshot();
                     window_context.dirty = true;
                     if window_context.display.window.has_frame {
                         window_context.display.window.request_redraw();
@@ -2153,6 +2159,9 @@ mod tests {
     use std::cell::Cell;
     use std::time::{Duration, Instant};
 
+    use winit::dpi::PhysicalPosition;
+    use winit::event::WindowEvent;
+
     use super::AccessibilityEventSource;
 
     struct TestAccessibilityEventSource {
@@ -2185,5 +2194,12 @@ mod tests {
             Some(accessibility_deadline)
         );
         assert!(source.flushed.get());
+    }
+
+    #[test]
+    fn accessibility_invalidation_matrix() {
+        assert!(!super::Processor::skip_window_event(&WindowEvent::Moved(PhysicalPosition::new(
+            10, 20
+        ),)));
     }
 }

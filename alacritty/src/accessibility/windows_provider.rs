@@ -3,8 +3,8 @@
 use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::EventListener;
@@ -16,7 +16,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::Com::SAFEARRAY;
 use windows_sys::Win32::System::Variant::{
-    VARENUM, VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4, VariantInit,
+    VARENUM, VARIANT, VT_BOOL, VT_BSTR, VT_EMPTY, VT_I4, VariantClear, VariantInit,
 };
 use windows_sys::Win32::UI::Accessibility::{
     NotificationKind_ItemAdded, NotificationProcessing_CurrentThenMostRecent, ProviderOptions,
@@ -27,8 +27,8 @@ use windows_sys::Win32::UI::Accessibility::{
     UIA_PROPERTY_ID, UIA_Text_TextChangedEventId, UIA_Text_TextSelectionChangedEventId,
     UIA_TextControlTypeId, UIA_TextPattern2Id, UIA_TextPatternId, UiaClientsAreListening,
     UiaDisconnectProvider, UiaHostProviderFromHwnd, UiaRaiseActiveTextPositionChangedEvent,
-    UiaRaiseAutomationEvent, UiaRaiseNotificationEvent, UiaReturnRawElementProvider,
-    UiaRootObjectId,
+    UiaRaiseAutomationEvent, UiaRaiseAutomationPropertyChangedEvent, UiaRaiseNotificationEvent,
+    UiaReturnRawElementProvider, UiaRootObjectId,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -132,6 +132,38 @@ impl UiaEventSink for NativeUiaEventSink {
     }
 }
 
+impl NativeUiaEventSink {
+    fn raise_name_changed(&mut self, provider: *mut c_void, old_name: &str, new_name: &str) {
+        // SAFETY: An all-zero `VARIANT` is the valid `VT_EMPTY` representation; both values are
+        // immediately passed to `VariantInit` before any union field is read or written.
+        let (mut old_value, mut new_value): (VARIANT, VARIANT) =
+            unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+        unsafe {
+            // SAFETY: Both variants are initialized before use and own one BSTR each. UIA borrows
+            // the by-value variants only for this call; each BSTR is released exactly once by the
+            // matching `VariantClear` after the call returns.
+            VariantInit(&mut old_value);
+            VariantInit(&mut new_value);
+            old_value.Anonymous.Anonymous.vt = VT_BSTR;
+            old_value.Anonymous.Anonymous.Anonymous.bstrVal = string_to_bstr(old_name);
+            new_value.Anonymous.Anonymous.vt = VT_BSTR;
+            new_value.Anonymous.Anonymous.Anonymous.bstrVal = string_to_bstr(new_name);
+            let result = UiaRaiseAutomationPropertyChangedEvent(
+                provider,
+                UIA_NamePropertyId,
+                old_value,
+                new_value,
+            );
+            trace_uia(&format!("raise_property_changed {UIA_NamePropertyId} result={result:#x}"));
+            if result >= 0 {
+                write_event_trace(UIA_NamePropertyId);
+            }
+            let _ = VariantClear(&mut old_value);
+            let _ = VariantClear(&mut new_value);
+        }
+    }
+}
+
 fn write_event_trace(event_id: i32) {
     if let Ok(path) = std::env::var("ALACRITTY_UIA_EVENT_TRACE") {
         let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(
@@ -143,11 +175,42 @@ fn write_event_trace(event_id: i32) {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct PublishedSnapshotState {
-    text: String,
+    snapshot: VisibleTerminalSnapshot,
     cursor: Point<usize>,
     selection: Vec<(usize, usize)>,
+    layout: Option<TextProviderLayout>,
+    focused: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PublishedSnapshotChanges {
+    complete_state_changed: bool,
+    text_changed: bool,
+    selection_changed: bool,
+    active_text_position_changed: bool,
+}
+
+impl PublishedSnapshotState {
+    fn changes_from(&self, previous: Option<&Self>) -> PublishedSnapshotChanges {
+        PublishedSnapshotChanges {
+            complete_state_changed: previous != Some(self),
+            text_changed: previous
+                .is_none_or(|previous| previous.snapshot.text() != self.snapshot.text()),
+            selection_changed: published_selection_changed(
+                previous.map(|previous| previous.selection.as_slice()),
+                &self.selection,
+            ),
+            active_text_position_changed: previous.is_none_or(|previous| {
+                previous.cursor != self.cursor || previous.focused != self.focused
+            }),
+        }
+    }
+}
+
+fn update_focus_state(current: &AtomicBool, focused: bool) -> bool {
+    current.swap(focused, Ordering::AcqRel) != focused
 }
 
 #[derive(Debug)]
@@ -275,14 +338,24 @@ impl UiaEventThrottle {
 }
 
 /// Minimal UIA provider state for an Alacritty terminal window.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct TerminalProvider {
-    name: String,
+    name: RwLock<String>,
 }
 
 impl TerminalProvider {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self { name: RwLock::new(name.into()) }
+    }
+
+    pub fn set_name(&self, name: impl Into<String>) -> Option<String> {
+        let name = name.into();
+        let mut current = self.name.write().expect("provider name lock poisoned");
+        if *current == name {
+            return None;
+        }
+
+        Some(std::mem::replace(&mut *current, name))
     }
 
     pub fn provider_options(&self) -> ProviderOptions {
@@ -298,7 +371,9 @@ impl TerminalProvider {
 
     pub fn property_bstr(&self, property_id: UIA_PROPERTY_ID) -> Option<String> {
         match property_id {
-            id if id == UIA_NamePropertyId => Some(self.name.clone()),
+            id if id == UIA_NamePropertyId => {
+                Some(self.name.read().expect("provider name lock poisoned").clone())
+            },
             _ => None,
         }
     }
@@ -339,6 +414,7 @@ impl TerminalProvider {
 pub struct WindowsAccessibility {
     hwnd: HWND,
     provider: NonNull<RawProvider>,
+    focused: AtomicBool,
     last_snapshot: Mutex<Option<PublishedSnapshotState>>,
     event_throttle: Mutex<UiaEventThrottle>,
 }
@@ -378,6 +454,7 @@ impl WindowsAccessibility {
             Some(Self {
                 hwnd,
                 provider,
+                focused: AtomicBool::new(focused),
                 last_snapshot: Mutex::new(None),
                 event_throttle: Mutex::new(UiaEventThrottle::new(
                     UIA_EVENT_THROTTLE,
@@ -395,39 +472,59 @@ impl WindowsAccessibility {
         let snapshot = VisibleTerminalSnapshot::from_term(term);
         let layout = self.layout_for_snapshot(&snapshot, size_info);
         let selection = snapshot.selection_offsets(term);
-        let raw_cursor = snapshot.cursor();
         let cursor_visible = term.mode().contains(TermMode::SHOW_CURSOR);
-        let cursor_offset =
-            snapshot.offset_for_point(raw_cursor).unwrap_or_else(|| snapshot.text().len());
-        let cursor_row_text = snapshot.row_text(raw_cursor.line).unwrap_or_default().to_owned();
-        let (cursor, text_changed, selection_changed, active_text_position_changed, notification) =
-            self.snapshot_changes(
-                snapshot.text().to_owned(),
-                raw_cursor,
-                cursor_visible,
-                cursor_offset,
-                cursor_row_text,
-                selection.clone(),
-            );
-        unsafe {
-            let provider = &*self.provider.as_ptr();
-            provider.set_terminal_state(snapshot, layout, selection, cursor, term.is_focused);
+        let (cursor, changes, notification) = self.snapshot_changes(
+            snapshot.clone(),
+            cursor_visible,
+            selection.clone(),
+            layout,
+            term.is_focused,
+        );
+        if changes.complete_state_changed {
+            unsafe {
+                let provider = &*self.provider.as_ptr();
+                provider.set_terminal_state(snapshot, layout, selection, cursor, term.is_focused);
+            }
         }
         self.record_and_flush_events(
-            text_changed,
-            selection_changed,
-            active_text_position_changed,
+            changes.text_changed,
+            changes.selection_changed,
+            changes.active_text_position_changed,
             notification,
             term.is_focused,
         );
     }
 
     pub fn set_focused(&self, focused: bool) {
+        if !update_focus_state(&self.focused, focused) {
+            return;
+        }
+
         trace_uia(&format!("accessibility.focus focused={focused}"));
         unsafe {
             (*self.provider.as_ptr()).set_focused(focused);
         }
+        if let Some(snapshot) =
+            self.last_snapshot.lock().expect("accessibility state lock poisoned").as_mut()
+        {
+            snapshot.focused = focused;
+        }
         self.record_and_flush_events(false, false, true, None, focused);
+    }
+
+    pub fn set_name(&self, name: impl Into<String>) {
+        let name = name.into();
+        // SAFETY: This attachment retains the owning `RawProvider` reference until `Drop`, so the
+        // pointer remains valid for this non-reentrant state update.
+        let provider = unsafe { &*self.provider.as_ptr() };
+        let Some(old_name) = provider.provider.set_name(&name) else {
+            return;
+        };
+
+        let mut sink = NativeUiaEventSink { provider: self.provider };
+        if sink.clients_are_listening() {
+            sink.raise_name_changed(self.raw_provider(), &old_name, &name);
+        }
     }
 
     pub fn event_deadline(&self) -> Option<Instant> {
@@ -442,15 +539,18 @@ impl WindowsAccessibility {
 
     fn snapshot_changes(
         &self,
-        text: String,
-        raw_cursor: Point<usize>,
+        snapshot: VisibleTerminalSnapshot,
         cursor_visible: bool,
-        cursor_offset: usize,
-        cursor_row_text: String,
         selection: Vec<(usize, usize)>,
-    ) -> (Point<usize>, bool, bool, bool, Option<String>) {
+        layout: Option<TextProviderLayout>,
+        focused: bool,
+    ) -> (Point<usize>, PublishedSnapshotChanges, Option<String>) {
         let mut last_snapshot =
             self.last_snapshot.lock().expect("accessibility state lock poisoned");
+        let raw_cursor = snapshot.cursor();
+        let cursor_offset =
+            snapshot.offset_for_point(raw_cursor).unwrap_or_else(|| snapshot.text().len());
+        let cursor_row_text = snapshot.row_text(raw_cursor.line).unwrap_or_default().to_owned();
         let cursor = accessibility_cursor(
             raw_cursor,
             cursor_visible,
@@ -458,24 +558,26 @@ impl WindowsAccessibility {
             last_snapshot.as_ref().map(|snapshot| snapshot.cursor),
         );
         let cursor_suppressed = cursor != raw_cursor;
-        let text_changed = last_snapshot.as_ref().is_none_or(|snapshot| snapshot.text != text);
+        let state = PublishedSnapshotState { snapshot, cursor, selection, layout, focused };
+        let changes = state.changes_from(last_snapshot.as_ref());
         let cursor_changed =
             last_snapshot.as_ref().is_none_or(|snapshot| snapshot.cursor != cursor);
-        let active_text_position_changed = cursor_changed;
-        let selection_changed = published_selection_changed(
-            last_snapshot.as_ref().map(|snapshot| snapshot.selection.as_slice()),
-            &selection,
-        );
-        let notification = last_snapshot
-            .as_ref()
-            .and_then(|snapshot| output_notification_text(&snapshot.text, &text));
-        if text_changed || cursor_changed || selection_changed {
+        let notification = last_snapshot.as_ref().and_then(|snapshot| {
+            output_notification_text(snapshot.snapshot.text(), state.snapshot.text())
+        });
+        if changes.text_changed || cursor_changed || changes.selection_changed {
             trace_uia(&format!(
-                "snapshot.state text_changed={text_changed} cursor_changed={cursor_changed} \
-                 selection_changed={selection_changed} cursor_visible={cursor_visible} \
+                "snapshot.state text_changed={} cursor_changed={cursor_changed} \
+                 selection_changed={} cursor_visible={cursor_visible} \
                  cursor_suppressed={cursor_suppressed} raw_cursor_row={} raw_cursor_col={} \
                  cursor_row={} cursor_col={} cursor_offset={} row_text={cursor_row_text:?}",
-                raw_cursor.line, raw_cursor.column.0, cursor.line, cursor.column.0, cursor_offset,
+                changes.text_changed,
+                changes.selection_changed,
+                raw_cursor.line,
+                raw_cursor.column.0,
+                cursor.line,
+                cursor.column.0,
+                cursor_offset,
             ));
         }
         if let Some(notification) = &notification {
@@ -484,8 +586,8 @@ impl WindowsAccessibility {
                 notification.len()
             ));
         }
-        *last_snapshot = Some(PublishedSnapshotState { text, cursor, selection });
-        (cursor, text_changed, selection_changed, active_text_position_changed, notification)
+        *last_snapshot = Some(state);
+        (cursor, changes, notification)
     }
 
     fn record_and_flush_events(
@@ -1381,10 +1483,12 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{OBJID_CLIENT, WM_GETOBJECT};
 
     use super::{
-        RawProvider, TerminalProvider, accessibility_cursor, add_ref, hwnd_from_raw_window_handle,
-        output_notification_text, provider_for_getobject, release, should_handle_wm_getobject,
-        take_deferred_teardown, teardown_provider,
+        PublishedSnapshotState, RawProvider, TerminalProvider, VisibleTerminalSnapshot,
+        accessibility_cursor, add_ref, hwnd_from_raw_window_handle, output_notification_text,
+        provider_for_getobject, release, should_handle_wm_getobject, take_deferred_teardown,
+        teardown_provider, update_focus_state,
     };
+    use crate::accessibility::text_pattern::TextProviderLayout;
     use alacritty_terminal::index::{Column, Point};
 
     #[test]
@@ -1409,6 +1513,88 @@ mod tests {
             provider.property_variant_type(UIA_IsTextPattern2AvailablePropertyId),
             Some(VT_BOOL)
         );
+    }
+
+    #[test]
+    fn accessibility_invalidation_matrix() {
+        let base = PublishedSnapshotState {
+            snapshot: VisibleTerminalSnapshot::from_text_for_tests("text", 80, 24),
+            cursor: Point::new(0, Column(0)),
+            selection: vec![(0, 2)],
+            layout: Some(TextProviderLayout::new(0.0, 0.0, 8.0, 16.0, 80, 24)),
+            focused: true,
+        };
+
+        let mut text = base.clone();
+        text.snapshot = VisibleTerminalSnapshot::from_text_for_tests("text!", 80, 24);
+        let changes = text.changes_from(Some(&base));
+        assert!(changes.complete_state_changed);
+        assert!(changes.text_changed);
+        assert!(!changes.selection_changed);
+        assert!(!changes.active_text_position_changed);
+
+        let mut mapping = base.clone();
+        mapping.snapshot = VisibleTerminalSnapshot::from_text_for_tests("text", 40, 24);
+        let changes = mapping.changes_from(Some(&base));
+        assert!(changes.complete_state_changed);
+        assert!(!changes.text_changed);
+        assert!(!changes.selection_changed);
+        assert!(!changes.active_text_position_changed);
+
+        let mut caret = base.clone();
+        caret.cursor = Point::new(0, Column(1));
+        let changes = caret.changes_from(Some(&base));
+        assert!(changes.complete_state_changed);
+        assert!(!changes.text_changed);
+        assert!(!changes.selection_changed);
+        assert!(changes.active_text_position_changed);
+
+        let mut selection = base.clone();
+        selection.selection = vec![(1, 3)];
+        let changes = selection.changes_from(Some(&base));
+        assert!(changes.complete_state_changed);
+        assert!(!changes.text_changed);
+        assert!(changes.selection_changed);
+        assert!(!changes.active_text_position_changed);
+
+        let mut layout = base.clone();
+        layout.layout = Some(TextProviderLayout::new(20.0, 30.0, 8.0, 16.0, 80, 24));
+        let changes = layout.changes_from(Some(&base));
+        assert!(changes.complete_state_changed);
+        assert!(!changes.text_changed);
+        assert!(!changes.selection_changed);
+        assert!(!changes.active_text_position_changed);
+
+        let mut focus = base.clone();
+        focus.focused = false;
+        let changes = focus.changes_from(Some(&base));
+        assert!(changes.complete_state_changed);
+        assert!(!changes.text_changed);
+        assert!(!changes.selection_changed);
+        assert!(changes.active_text_position_changed);
+
+        let provider = TerminalProvider::new("old title");
+        assert_eq!(provider.set_name("new title"), Some("old title".to_owned()));
+        assert_eq!(provider.set_name("new title"), None);
+        assert_eq!(provider.property_bstr(UIA_NamePropertyId).as_deref(), Some("new title"));
+
+        let focused = std::sync::atomic::AtomicBool::new(true);
+        assert!(!update_focus_state(&focused, true));
+        assert!(update_focus_state(&focused, false));
+        assert!(!update_focus_state(&focused, false));
+    }
+
+    #[test]
+    fn accessibility_snapshot_deduplicates_equal_state() {
+        let state = PublishedSnapshotState {
+            snapshot: VisibleTerminalSnapshot::from_text_for_tests("text", 80, 24),
+            cursor: Point::new(0, Column(0)),
+            selection: vec![(0, 2)],
+            layout: Some(TextProviderLayout::new(0.0, 0.0, 8.0, 16.0, 80, 24)),
+            focused: true,
+        };
+
+        assert_eq!(state.changes_from(Some(&state)), Default::default());
     }
 
     #[test]

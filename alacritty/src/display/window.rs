@@ -267,6 +267,10 @@ impl Window {
     #[inline]
     pub fn set_title(&mut self, title: String) {
         self.title = title;
+        #[cfg(windows)]
+        if let Some(accessibility) = &self._accessibility {
+            accessibility.set_name(&self.title);
+        }
         self.window.set_title(&self.title);
     }
 

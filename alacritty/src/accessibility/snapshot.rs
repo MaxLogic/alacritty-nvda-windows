@@ -6,7 +6,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, point_to_viewport};
 
 /// Immutable snapshot of the terminal's visible text.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VisibleTerminalSnapshot {
     text: String,
     rows: Vec<SnapshotRow>,
@@ -14,7 +14,7 @@ pub struct VisibleTerminalSnapshot {
     cursor: Point<usize>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct SnapshotRow {
     text: String,
     start_offset: usize,

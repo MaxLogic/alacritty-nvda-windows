@@ -120,7 +120,7 @@ impl TextProviderState {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TextProviderLayout {
     origin_x: f64,
     origin_y: f64,

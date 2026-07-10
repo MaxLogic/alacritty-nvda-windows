@@ -799,9 +799,6 @@ impl Display {
 
         let vi_mode = terminal.mode().contains(TermMode::VI);
         let vi_cursor_point = if vi_mode { Some(terminal.vi_mode_cursor.point) } else { None };
-        #[cfg(windows)]
-        self.window.update_accessibility_snapshot(&terminal, &self.size_info);
-
         // Add damage from the terminal.
         match terminal.damage() {
             TermDamage::Full => self.damage_tracker.frame().mark_fully_damaged(),
