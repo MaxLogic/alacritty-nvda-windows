@@ -412,6 +412,21 @@ mod tests {
         toml::from_str::<UiConfig>("").unwrap();
     }
 
+    #[test]
+    fn accessibility_color_overrides_parse() {
+        let config = toml::from_str::<UiConfig>(
+            r#"
+[colors]
+ignore_reverse_video = true
+force_primary_colors = true
+"#,
+        )
+        .unwrap();
+
+        assert!(config.colors.ignore_reverse_video);
+        assert!(config.colors.force_primary_colors);
+    }
+
     fn yaml_to_toml(contents: &str) -> String {
         let mut value: serde_yaml::Value = serde_yaml::from_str(contents).unwrap();
         prune_yaml_nulls(&mut value, false);

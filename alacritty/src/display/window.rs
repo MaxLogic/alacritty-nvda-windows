@@ -19,6 +19,8 @@ use {
 };
 
 use std::fmt::{self, Display, Formatter};
+#[cfg(windows)]
+use std::time::Instant;
 
 #[cfg(target_os = "macos")]
 use {
@@ -39,8 +41,14 @@ use winit::window::{
     WindowAttributes, WindowId,
 };
 
+#[cfg(windows)]
+use alacritty_terminal::event::EventListener;
 use alacritty_terminal::index::Point;
+#[cfg(windows)]
+use alacritty_terminal::term::Term;
 
+#[cfg(windows)]
+use crate::accessibility::windows_provider::{WindowsAccessibility, hwnd_from_raw_window_handle};
 use crate::cli::WindowOptions;
 use crate::config::UiConfig;
 use crate::config::window::{Decorations, Identity, WindowConfig};
@@ -113,6 +121,8 @@ pub struct Window {
     /// Hold the window when terminal exits.
     pub hold: bool,
 
+    #[cfg(windows)]
+    _accessibility: Option<WindowsAccessibility>,
     window: WinitWindow,
 
     /// Current window title.
@@ -201,7 +211,15 @@ impl Window {
 
         let scale_factor = window.scale_factor();
         log::info!("Window scale factor: {scale_factor}");
-        let is_x11 = matches!(window.window_handle().unwrap().as_raw(), RawWindowHandle::Xlib(_));
+        let raw_window_handle = window.window_handle().unwrap().as_raw();
+        let is_x11 = matches!(raw_window_handle, RawWindowHandle::Xlib(_));
+        #[cfg(windows)]
+        let accessibility = hwnd_from_raw_window_handle(raw_window_handle)
+            // SAFETY: The HWND belongs to the `WinitWindow` stored in this `Window`, and the
+            // `_accessibility` field is declared before `window` so it is dropped first.
+            .and_then(|hwnd| unsafe {
+                WindowsAccessibility::new(hwnd, identity.title.clone(), window.has_focus())
+            });
 
         Ok(Self {
             hold: options.terminal_options.hold,
@@ -211,6 +229,8 @@ impl Window {
             mouse_visible: true,
             has_frame: true,
             scale_factor,
+            #[cfg(windows)]
+            _accessibility: accessibility,
             window,
             is_x11,
             ime_inhibitor: Default::default(),
@@ -247,7 +267,37 @@ impl Window {
     #[inline]
     pub fn set_title(&mut self, title: String) {
         self.title = title;
+        #[cfg(windows)]
+        if let Some(accessibility) = &self._accessibility {
+            accessibility.set_name(&self.title);
+        }
         self.window.set_title(&self.title);
+    }
+
+    #[cfg(windows)]
+    pub fn update_accessibility_snapshot<T: EventListener>(&self, term: &Term<T>, size: &SizeInfo) {
+        if let Some(accessibility) = &self._accessibility {
+            accessibility.update_snapshot(term, size);
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn set_accessibility_focused(&self, focused: bool) {
+        if let Some(accessibility) = &self._accessibility {
+            accessibility.set_focused(focused);
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn accessibility_event_deadline(&self) -> Option<Instant> {
+        self._accessibility.as_ref().and_then(WindowsAccessibility::event_deadline)
+    }
+
+    #[cfg(windows)]
+    pub fn flush_due_accessibility_events(&self, now: Instant) {
+        if let Some(accessibility) = &self._accessibility {
+            accessibility.flush_due_events(now);
+        }
     }
 
     /// Get the window title.
