@@ -192,6 +192,12 @@ impl UiaEventThrottle {
         }
     }
 
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        (self.has_emitted
+            && (self.pending_text || self.pending_selection || self.pending_notification.is_some()))
+        .then(|| self.last_emit + self.interval)
+    }
+
     pub(crate) fn flush_due<S: UiaEventSink>(
         &mut self,
         provider: *mut c_void,
@@ -422,6 +428,16 @@ impl WindowsAccessibility {
             (*self.provider.as_ptr()).set_focused(focused);
         }
         self.record_and_flush_events(false, false, true, None, focused);
+    }
+
+    pub fn event_deadline(&self) -> Option<Instant> {
+        self.event_throttle.lock().expect("event throttle lock poisoned").next_deadline()
+    }
+
+    pub fn flush_due_events(&self, now: Instant) {
+        let mut throttle = self.event_throttle.lock().expect("event throttle lock poisoned");
+        let mut sink = NativeUiaEventSink { provider: self.provider };
+        throttle.flush_due(self.raw_provider(), now, &mut sink);
     }
 
     fn snapshot_changes(

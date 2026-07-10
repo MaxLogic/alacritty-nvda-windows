@@ -127,6 +127,37 @@ mod tests {
     }
 
     #[test]
+    fn trailing_uia_event_flushes_without_new_input() {
+        let start = Instant::now();
+        let interval = Duration::from_millis(75);
+        let mut throttle = UiaEventThrottle::new(interval, start);
+        let mut sink = RecordingSink {
+            listening: true,
+            events: Vec::new(),
+            active_text_position_events: 0,
+            notifications: Vec::new(),
+        };
+
+        throttle.record_snapshot_change(true, false, false, Some("first".to_owned()), true);
+        throttle.flush_due(std::ptr::null_mut(), start, &mut sink);
+        throttle.record_snapshot_change(true, false, false, Some("final".to_owned()), true);
+
+        let deadline = throttle.next_deadline().expect("trailing event deadline");
+        assert_eq!(deadline, start + interval);
+
+        throttle.flush_due(std::ptr::null_mut(), deadline, &mut sink);
+
+        assert_eq!(sink.events, [
+            UIA_Text_TextChangedEventId,
+            UIA_NotificationEventId,
+            UIA_Text_TextChangedEventId,
+            UIA_NotificationEventId,
+        ]);
+        assert_eq!(sink.notifications, ["first", "final"]);
+        assert_eq!(throttle.next_deadline(), None);
+    }
+
+    #[test]
     fn emits_caret_only_change_immediately_inside_throttle_interval() {
         let start = Instant::now();
         let mut throttle = UiaEventThrottle::new(Duration::from_millis(75), start);

@@ -19,6 +19,8 @@ use {
 };
 
 use std::fmt::{self, Display, Formatter};
+#[cfg(windows)]
+use std::time::Instant;
 
 #[cfg(target_os = "macos")]
 use {
@@ -279,6 +281,18 @@ impl Window {
     pub fn set_accessibility_focused(&self, focused: bool) {
         if let Some(accessibility) = &self._accessibility {
             accessibility.set_focused(focused);
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn accessibility_event_deadline(&self) -> Option<Instant> {
+        self._accessibility.as_ref().and_then(WindowsAccessibility::event_deadline)
+    }
+
+    #[cfg(windows)]
+    pub fn flush_due_accessibility_events(&self, now: Instant) {
+        if let Some(accessibility) = &self._accessibility {
+            accessibility.flush_due_events(now);
         }
     }
 

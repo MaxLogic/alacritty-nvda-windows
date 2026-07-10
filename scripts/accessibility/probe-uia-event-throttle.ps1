@@ -4,6 +4,7 @@ param(
     [int]$ObservationSeconds = 3,
     [int]$MaxTextChangedEvents = 90,
     [int]$MaxNotificationEvents = 90,
+    [int]$MinNotificationEvents = 0,
     [string]$TracePath = "",
     [switch]$VerifyFocusPolicy,
     [int]$PhaseSeconds = 3,
@@ -166,8 +167,12 @@ if ($VerifyFocusPolicy) {
         }
         $focused = Measure-Phase -Pattern $pattern -Phase "focused" -Seconds $PhaseSeconds `
             -EventTracePath $TracePath -SignalDirectory $StimulusDirectory
-        if (-not $focused.ContentChanged -or $focused.Notification -le 0) {
-            Write-Error "Focused output did not produce changing text and notification event 20035."
+        $requiredFocusedNotifications = [Math]::Max(1, $MinNotificationEvents)
+        if (
+            -not $focused.ContentChanged `
+                -or $focused.Notification -lt $requiredFocusedNotifications
+        ) {
+            Write-Error "Focused output did not produce changing text and at least $requiredFocusedNotifications notification events."
         }
 
         if (-not [AlacrittyFocusProbeNative]::SetForegroundWindow($alternateHandle)) {
@@ -254,6 +259,10 @@ if ($observedEvents -gt $MaxTextChangedEvents) {
 
 if ($traceNotificationEventsObserved -gt $MaxNotificationEvents) {
     Write-Error "Observed $traceNotificationEventsObserved Notification events; expected at most $MaxNotificationEvents."
+}
+
+if ($traceNotificationEventsObserved -lt $MinNotificationEvents) {
+    Write-Error "Observed $traceNotificationEventsObserved Notification events; expected at least $MinNotificationEvents."
 }
 
 Write-Output "Event coalescing: PASS"
