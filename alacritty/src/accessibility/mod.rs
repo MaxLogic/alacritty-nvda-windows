@@ -3,6 +3,8 @@
 #[cfg(windows)]
 pub mod event_throttle;
 #[cfg(windows)]
+pub(crate) mod ffi;
+#[cfg(windows)]
 pub mod range_from_point;
 #[cfg(windows)]
 pub mod selection;

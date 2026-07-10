@@ -341,7 +341,7 @@ impl WindowsAccessibility {
         let provider = RawProvider::allocate(hwnd, TerminalProvider::new(name));
         let ref_data = provider.as_ptr() as usize;
         let installed = unsafe {
-            SetWindowSubclass(hwnd, Some(accessibility_subclass_proc), SUBCLASS_ID, ref_data)
+            SetWindowSubclass(hwnd, Some(accessibility_subclass_proc_ffi), SUBCLASS_ID, ref_data)
         };
 
         if installed == 0 {
@@ -497,7 +497,7 @@ impl Drop for WindowsAccessibility {
             // HWND. Dropping `WindowsAccessibility` disconnects UIA and removes the subclass
             // before releasing the owning COM reference.
             UiaDisconnectProvider(self.raw_provider());
-            RemoveWindowSubclass(self.hwnd, Some(accessibility_subclass_proc), SUBCLASS_ID);
+            RemoveWindowSubclass(self.hwnd, Some(accessibility_subclass_proc_ffi), SUBCLASS_ID);
             release(self.raw_provider());
         }
     }
@@ -516,7 +516,7 @@ pub fn hwnd_from_raw_window_handle(raw_window_handle: RawWindowHandle) -> Option
     }
 }
 
-unsafe extern "system" fn accessibility_subclass_proc(
+unsafe fn accessibility_subclass_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
@@ -537,6 +537,28 @@ unsafe extern "system" fn accessibility_subclass_proc(
     }
 
     unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+}
+
+unsafe extern "system" fn accessibility_subclass_proc_ffi(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    subclass_id: usize,
+    ref_data: usize,
+) -> LRESULT {
+    crate::accessibility::ffi::catch_lresult(
+        "accessibility_subclass_proc",
+        || unsafe {
+            // SAFETY: This forwards the exact message arguments received by the subclass.
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        },
+        || unsafe {
+            // SAFETY: The wrapper forwards the callback arguments unchanged and the
+            // implementation retains the callback's original unsafe preconditions.
+            accessibility_subclass_proc(hwnd, message, wparam, lparam, subclass_id, ref_data)
+        },
+    )
 }
 
 #[repr(C)]
@@ -697,13 +719,13 @@ impl std::fmt::Debug for RawProviderVtable {
 }
 
 static RAW_PROVIDER_VTABLE: RawProviderVtable = RawProviderVtable {
-    query_interface,
-    add_ref,
-    release,
-    provider_options,
-    get_pattern_provider,
-    get_property_value,
-    host_raw_element_provider,
+    query_interface: query_interface_ffi,
+    add_ref: add_ref_ffi,
+    release: release_ffi,
+    provider_options: provider_options_ffi,
+    get_pattern_provider: get_pattern_provider_ffi,
+    get_property_value: get_property_value_ffi,
+    host_raw_element_provider: host_raw_element_provider_ffi,
 };
 
 #[repr(C)]
@@ -741,14 +763,14 @@ impl std::fmt::Debug for RawProviderAdviseEventsVtable {
 
 static RAW_PROVIDER_ADVISE_EVENTS_VTABLE: RawProviderAdviseEventsVtable =
     RawProviderAdviseEventsVtable {
-        query_interface: advise_events_query_interface,
-        add_ref: advise_events_add_ref,
-        release: advise_events_release,
-        advise_event_added,
-        advise_event_removed,
+        query_interface: advise_events_query_interface_ffi,
+        add_ref: advise_events_add_ref_ffi,
+        release: advise_events_release_ffi,
+        advise_event_added: advise_event_added_ffi,
+        advise_event_removed: advise_event_removed_ffi,
     };
 
-unsafe extern "system" fn query_interface(
+unsafe fn query_interface(
     this: *mut c_void,
     iid: *const GUID,
     interface: *mut *mut c_void,
@@ -780,12 +802,12 @@ unsafe extern "system" fn query_interface(
     }
 }
 
-unsafe extern "system" fn add_ref(this: *mut c_void) -> u32 {
+unsafe fn add_ref(this: *mut c_void) -> u32 {
     let provider = unsafe { &*(this as *const RawProvider) };
     provider.ref_count.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-unsafe extern "system" fn release(this: *mut c_void) -> u32 {
+unsafe fn release(this: *mut c_void) -> u32 {
     let provider = unsafe { &*(this as *const RawProvider) };
     let previous = provider.ref_count.fetch_sub(1, Ordering::Release);
     let remaining = previous.saturating_sub(1);
@@ -802,7 +824,7 @@ unsafe extern "system" fn release(this: *mut c_void) -> u32 {
     remaining
 }
 
-unsafe extern "system" fn advise_events_query_interface(
+unsafe fn advise_events_query_interface(
     this: *mut c_void,
     iid: *const GUID,
     interface: *mut *mut c_void,
@@ -815,12 +837,12 @@ unsafe extern "system" fn advise_events_query_interface(
     unsafe { query_interface(advise_events.owner, iid, interface) }
 }
 
-unsafe extern "system" fn advise_events_add_ref(this: *mut c_void) -> u32 {
+unsafe fn advise_events_add_ref(this: *mut c_void) -> u32 {
     let advise_events = unsafe { &*(this as *const RawProviderAdviseEvents) };
     unsafe { add_ref(advise_events.owner) }
 }
 
-unsafe extern "system" fn advise_events_release(this: *mut c_void) -> u32 {
+unsafe fn advise_events_release(this: *mut c_void) -> u32 {
     let advise_events = unsafe { &*(this as *const RawProviderAdviseEvents) };
     unsafe { release(advise_events.owner) }
 }
@@ -833,10 +855,7 @@ pub(crate) unsafe fn release_raw_provider(provider: *mut c_void) -> u32 {
     if provider.is_null() { 0 } else { unsafe { release(provider) } }
 }
 
-unsafe extern "system" fn provider_options(
-    this: *mut c_void,
-    options: *mut ProviderOptions,
-) -> HRESULT {
+unsafe fn provider_options(this: *mut c_void, options: *mut ProviderOptions) -> HRESULT {
     if options.is_null() {
         return E_POINTER;
     }
@@ -849,7 +868,7 @@ unsafe extern "system" fn provider_options(
     S_OK
 }
 
-unsafe extern "system" fn get_pattern_provider(
+unsafe fn get_pattern_provider(
     this: *mut c_void,
     pattern_id: i32,
     pattern_provider: *mut *mut c_void,
@@ -875,7 +894,7 @@ unsafe extern "system" fn get_pattern_provider(
     S_OK
 }
 
-unsafe extern "system" fn get_property_value(
+unsafe fn get_property_value(
     this: *mut c_void,
     property_id: UIA_PROPERTY_ID,
     value: *mut VARIANT,
@@ -909,10 +928,7 @@ unsafe extern "system" fn get_property_value(
     S_OK
 }
 
-unsafe extern "system" fn host_raw_element_provider(
-    this: *mut c_void,
-    provider: *mut *mut c_void,
-) -> HRESULT {
+unsafe fn host_raw_element_provider(this: *mut c_void, provider: *mut *mut c_void) -> HRESULT {
     if provider.is_null() {
         return E_POINTER;
     }
@@ -922,7 +938,7 @@ unsafe extern "system" fn host_raw_element_provider(
     unsafe { UiaHostProviderFromHwnd(raw_provider.hwnd, provider) }
 }
 
-unsafe extern "system" fn advise_event_added(
+unsafe fn advise_event_added(
     this: *mut c_void,
     _event_id: i32,
     _property_ids: *mut SAFEARRAY,
@@ -941,7 +957,7 @@ unsafe extern "system" fn advise_event_added(
     S_OK
 }
 
-unsafe extern "system" fn advise_event_removed(
+unsafe fn advise_event_removed(
     this: *mut c_void,
     _event_id: i32,
     _property_ids: *mut SAFEARRAY,
@@ -959,6 +975,69 @@ unsafe extern "system" fn advise_event_removed(
 
     S_OK
 }
+
+crate::accessibility::ffi::hresult_boundary!(
+    query_interface_ffi => query_interface(
+        this: *mut c_void,
+        iid: *const GUID,
+        interface: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::u32_boundary!(add_ref_ffi => add_ref(this: *mut c_void));
+crate::accessibility::ffi::u32_boundary!(release_ffi => release(this: *mut c_void));
+crate::accessibility::ffi::hresult_boundary!(
+    provider_options_ffi => provider_options(
+        this: *mut c_void,
+        options: *mut ProviderOptions,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    get_pattern_provider_ffi => get_pattern_provider(
+        this: *mut c_void,
+        pattern_id: i32,
+        pattern_provider: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    get_property_value_ffi => get_property_value(
+        this: *mut c_void,
+        property_id: UIA_PROPERTY_ID,
+        value: *mut VARIANT,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    host_raw_element_provider_ffi => host_raw_element_provider(
+        this: *mut c_void,
+        provider: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    advise_events_query_interface_ffi => advise_events_query_interface(
+        this: *mut c_void,
+        iid: *const GUID,
+        interface: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::u32_boundary!(
+    advise_events_add_ref_ffi => advise_events_add_ref(this: *mut c_void)
+);
+crate::accessibility::ffi::u32_boundary!(
+    advise_events_release_ffi => advise_events_release(this: *mut c_void)
+);
+crate::accessibility::ffi::hresult_boundary!(
+    advise_event_added_ffi => advise_event_added(
+        this: *mut c_void,
+        event_id: i32,
+        property_ids: *mut SAFEARRAY,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    advise_event_removed_ffi => advise_event_removed(
+        this: *mut c_void,
+        event_id: i32,
+        property_ids: *mut SAFEARRAY,
+    )
+);
 
 fn guid_eq(left: &GUID, right: &GUID) -> bool {
     left.data1 == right.data1
@@ -1227,8 +1306,8 @@ mod tests {
     fn accessibility_cursor_preserves_previous_caret_for_status_footer() {
         let previous = Point::new(19, Column(13));
         let footer_cursor = Point::new(22, Column(102));
-        let footer = "  terminal medium \u{00b7} C:\\work\\alacritty \u{00b7} \
-                      Context 100% left \u{00b7} weekly 55% left \u{00b7} 0 in \u{00b7} 0 out";
+        let footer = "  terminal medium \u{00b7} C:\\work\\alacritty \u{00b7} Context 100% left \
+                      \u{00b7} weekly 55% left \u{00b7} 0 in \u{00b7} 0 out";
 
         assert_eq!(accessibility_cursor(footer_cursor, true, footer, Some(previous)), previous);
     }

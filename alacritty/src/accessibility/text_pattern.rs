@@ -297,20 +297,20 @@ pub(crate) struct RawTextProviderVtable {
 }
 
 static RAW_TEXT_PROVIDER_VTABLE: RawTextProviderVtable = RawTextProviderVtable {
-    query_interface: text_provider_query_interface,
-    add_ref: text_provider_add_ref,
-    release: text_provider_release,
-    get_selection: text_provider_get_selection,
-    get_visible_ranges: text_provider_get_visible_ranges,
-    range_from_child: text_provider_range_from_child,
-    range_from_point: text_provider_range_from_point,
-    document_range: text_provider_document_range,
-    supported_text_selection: text_provider_supported_text_selection,
-    range_from_annotation: text_provider_range_from_annotation,
-    get_caret_range: text_provider_get_caret_range,
+    query_interface: text_provider_query_interface_ffi,
+    add_ref: text_provider_add_ref_ffi,
+    release: text_provider_release_ffi,
+    get_selection: text_provider_get_selection_ffi,
+    get_visible_ranges: text_provider_get_visible_ranges_ffi,
+    range_from_child: text_provider_range_from_child_ffi,
+    range_from_point: text_provider_range_from_point_ffi,
+    document_range: text_provider_document_range_ffi,
+    supported_text_selection: text_provider_supported_text_selection_ffi,
+    range_from_annotation: text_provider_range_from_annotation_ffi,
+    get_caret_range: text_provider_get_caret_range_ffi,
 };
 
-unsafe extern "system" fn text_provider_query_interface(
+unsafe fn text_provider_query_interface(
     this: *mut c_void,
     iid: *const GUID,
     interface: *mut *mut c_void,
@@ -339,12 +339,12 @@ unsafe extern "system" fn text_provider_query_interface(
     }
 }
 
-unsafe extern "system" fn text_provider_add_ref(this: *mut c_void) -> u32 {
+unsafe fn text_provider_add_ref(this: *mut c_void) -> u32 {
     let provider = unsafe { &*(this as *const RawTextProvider) };
     provider.ref_count.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-pub(crate) unsafe extern "system" fn text_provider_release(this: *mut c_void) -> u32 {
+pub(crate) unsafe fn text_provider_release(this: *mut c_void) -> u32 {
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let previous = provider.ref_count.fetch_sub(1, Ordering::Release);
     let remaining = previous.saturating_sub(1);
@@ -360,10 +360,7 @@ pub(crate) unsafe extern "system" fn text_provider_release(this: *mut c_void) ->
     remaining
 }
 
-unsafe extern "system" fn text_provider_get_selection(
-    this: *mut c_void,
-    ranges: *mut *mut SAFEARRAY,
-) -> HRESULT {
+unsafe fn text_provider_get_selection(this: *mut c_void, ranges: *mut *mut SAFEARRAY) -> HRESULT {
     if ranges.is_null() {
         return E_POINTER;
     }
@@ -407,7 +404,7 @@ unsafe extern "system" fn text_provider_get_selection(
     S_OK
 }
 
-unsafe extern "system" fn text_provider_get_visible_ranges(
+unsafe fn text_provider_get_visible_ranges(
     this: *mut c_void,
     ranges: *mut *mut SAFEARRAY,
 ) -> HRESULT {
@@ -433,7 +430,7 @@ unsafe extern "system" fn text_provider_get_visible_ranges(
     if array.is_null() { E_FAIL } else { S_OK }
 }
 
-unsafe extern "system" fn text_provider_range_from_child(
+unsafe fn text_provider_range_from_child(
     _this: *mut c_void,
     _child: *mut c_void,
     range: *mut *mut c_void,
@@ -446,7 +443,7 @@ unsafe extern "system" fn text_provider_range_from_child(
     E_INVALIDARG
 }
 
-unsafe extern "system" fn text_provider_range_from_point(
+unsafe fn text_provider_range_from_point(
     this: *mut c_void,
     point: UiaPoint,
     range: *mut *mut c_void,
@@ -469,10 +466,7 @@ unsafe extern "system" fn text_provider_range_from_point(
     S_OK
 }
 
-unsafe extern "system" fn text_provider_document_range(
-    this: *mut c_void,
-    range: *mut *mut c_void,
-) -> HRESULT {
+unsafe fn text_provider_document_range(this: *mut c_void, range: *mut *mut c_void) -> HRESULT {
     if range.is_null() {
         return E_POINTER;
     }
@@ -491,7 +485,7 @@ unsafe extern "system" fn text_provider_document_range(
     S_OK
 }
 
-unsafe extern "system" fn text_provider_supported_text_selection(
+unsafe fn text_provider_supported_text_selection(
     _this: *mut c_void,
     selection: *mut SupportedTextSelection,
 ) -> HRESULT {
@@ -504,7 +498,7 @@ unsafe extern "system" fn text_provider_supported_text_selection(
     S_OK
 }
 
-unsafe extern "system" fn text_provider_range_from_annotation(
+unsafe fn text_provider_range_from_annotation(
     _this: *mut c_void,
     _annotation: *mut c_void,
     range: *mut *mut c_void,
@@ -517,7 +511,7 @@ unsafe extern "system" fn text_provider_range_from_annotation(
     E_INVALIDARG
 }
 
-unsafe extern "system" fn text_provider_get_caret_range(
+unsafe fn text_provider_get_caret_range(
     this: *mut c_void,
     is_active: *mut BOOL,
     range: *mut *mut c_void,
@@ -668,30 +662,30 @@ pub(crate) struct RawTextRangeVtable {
 }
 
 static RAW_TEXT_RANGE_VTABLE: RawTextRangeVtable = RawTextRangeVtable {
-    query_interface: text_range_query_interface,
-    add_ref: text_range_add_ref,
-    release: text_range_release,
-    clone: text_range_clone,
-    compare: text_range_compare,
-    compare_endpoints: text_range_compare_endpoints,
-    expand_to_enclosing_unit: text_range_expand_to_enclosing_unit,
-    find_attribute: text_range_find_attribute,
-    find_text: text_range_find_text,
-    get_attribute_value: text_range_get_attribute_value,
-    get_bounding_rectangles: text_range_get_bounding_rectangles,
-    get_enclosing_element: text_range_get_enclosing_element,
-    get_text: text_range_get_text,
-    move_range: text_range_move,
-    move_endpoint_by_unit: text_range_move_endpoint_by_unit,
-    move_endpoint_by_range: text_range_move_endpoint_by_range,
-    select: text_range_select,
-    add_to_selection: text_range_add_to_selection,
-    remove_from_selection: text_range_remove_from_selection,
-    scroll_into_view: text_range_scroll_into_view,
-    get_children: text_range_get_children,
+    query_interface: text_range_query_interface_ffi,
+    add_ref: text_range_add_ref_ffi,
+    release: text_range_release_ffi,
+    clone: text_range_clone_ffi,
+    compare: text_range_compare_ffi,
+    compare_endpoints: text_range_compare_endpoints_ffi,
+    expand_to_enclosing_unit: text_range_expand_to_enclosing_unit_ffi,
+    find_attribute: text_range_find_attribute_ffi,
+    find_text: text_range_find_text_ffi,
+    get_attribute_value: text_range_get_attribute_value_ffi,
+    get_bounding_rectangles: text_range_get_bounding_rectangles_ffi,
+    get_enclosing_element: text_range_get_enclosing_element_ffi,
+    get_text: text_range_get_text_ffi,
+    move_range: text_range_move_ffi,
+    move_endpoint_by_unit: text_range_move_endpoint_by_unit_ffi,
+    move_endpoint_by_range: text_range_move_endpoint_by_range_ffi,
+    select: text_range_select_ffi,
+    add_to_selection: text_range_add_to_selection_ffi,
+    remove_from_selection: text_range_remove_from_selection_ffi,
+    scroll_into_view: text_range_scroll_into_view_ffi,
+    get_children: text_range_get_children_ffi,
 };
 
-unsafe extern "system" fn text_range_query_interface(
+unsafe fn text_range_query_interface(
     this: *mut c_void,
     iid: *const GUID,
     interface: *mut *mut c_void,
@@ -714,12 +708,12 @@ unsafe extern "system" fn text_range_query_interface(
     }
 }
 
-unsafe extern "system" fn text_range_add_ref(this: *mut c_void) -> u32 {
+unsafe fn text_range_add_ref(this: *mut c_void) -> u32 {
     let range = unsafe { &*(this as *const RawTextRange) };
     range.ref_count.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-pub(crate) unsafe extern "system" fn text_range_release(this: *mut c_void) -> u32 {
+pub(crate) unsafe fn text_range_release(this: *mut c_void) -> u32 {
     let range = unsafe { &*(this as *const RawTextRange) };
     let previous = range.ref_count.fetch_sub(1, Ordering::Release);
     let remaining = previous.saturating_sub(1);
@@ -739,7 +733,7 @@ pub(crate) unsafe fn release_text_range(range: *mut c_void) -> u32 {
     if range.is_null() { 0 } else { unsafe { text_range_release(range) } }
 }
 
-unsafe extern "system" fn text_range_clone(this: *mut c_void, range: *mut *mut c_void) -> HRESULT {
+unsafe fn text_range_clone(this: *mut c_void, range: *mut *mut c_void) -> HRESULT {
     if range.is_null() {
         return E_POINTER;
     }
@@ -756,11 +750,7 @@ unsafe extern "system" fn text_range_clone(this: *mut c_void, range: *mut *mut c
     S_OK
 }
 
-unsafe extern "system" fn text_range_compare(
-    this: *mut c_void,
-    other: *mut c_void,
-    equal: *mut BOOL,
-) -> HRESULT {
+unsafe fn text_range_compare(this: *mut c_void, other: *mut c_void, equal: *mut BOOL) -> HRESULT {
     if equal.is_null() {
         return E_POINTER;
     }
@@ -782,7 +772,7 @@ unsafe extern "system" fn text_range_compare(
     S_OK
 }
 
-unsafe extern "system" fn text_range_compare_endpoints(
+unsafe fn text_range_compare_endpoints(
     this: *mut c_void,
     endpoint: TextPatternRangeEndpoint,
     target_range: *mut c_void,
@@ -808,10 +798,7 @@ unsafe extern "system" fn text_range_compare_endpoints(
     S_OK
 }
 
-unsafe extern "system" fn text_range_expand_to_enclosing_unit(
-    this: *mut c_void,
-    unit: TextUnit,
-) -> HRESULT {
+unsafe fn text_range_expand_to_enclosing_unit(this: *mut c_void, unit: TextUnit) -> HRESULT {
     let range = unsafe { &mut *(this as *mut RawTextRange) };
     trace_uia(&format!("text_range.ExpandToEnclosingUnit {unit}"));
     if unit == TextUnit_Character {
@@ -833,7 +820,7 @@ unsafe extern "system" fn text_range_expand_to_enclosing_unit(
     S_OK
 }
 
-unsafe extern "system" fn text_range_find_attribute(
+unsafe fn text_range_find_attribute(
     _this: *mut c_void,
     _attribute_id: UIA_TEXTATTRIBUTE_ID,
     _value: VARIANT,
@@ -848,7 +835,7 @@ unsafe extern "system" fn text_range_find_attribute(
     S_OK
 }
 
-unsafe extern "system" fn text_range_find_text(
+unsafe fn text_range_find_text(
     _this: *mut c_void,
     _text: BSTR,
     _backward: BOOL,
@@ -863,7 +850,7 @@ unsafe extern "system" fn text_range_find_text(
     S_OK
 }
 
-unsafe extern "system" fn text_range_get_attribute_value(
+unsafe fn text_range_get_attribute_value(
     _this: *mut c_void,
     _attribute_id: UIA_TEXTATTRIBUTE_ID,
     value: *mut VARIANT,
@@ -880,7 +867,7 @@ unsafe extern "system" fn text_range_get_attribute_value(
     S_OK
 }
 
-unsafe extern "system" fn text_range_get_bounding_rectangles(
+unsafe fn text_range_get_bounding_rectangles(
     _this: *mut c_void,
     rectangles: *mut *mut SAFEARRAY,
 ) -> HRESULT {
@@ -893,7 +880,7 @@ unsafe extern "system" fn text_range_get_bounding_rectangles(
     S_OK
 }
 
-unsafe extern "system" fn text_range_get_enclosing_element(
+unsafe fn text_range_get_enclosing_element(
     this: *mut c_void,
     provider: *mut *mut c_void,
 ) -> HRESULT {
@@ -910,11 +897,7 @@ unsafe extern "system" fn text_range_get_enclosing_element(
     S_OK
 }
 
-unsafe extern "system" fn text_range_get_text(
-    this: *mut c_void,
-    max_length: i32,
-    text: *mut BSTR,
-) -> HRESULT {
+unsafe fn text_range_get_text(this: *mut c_void, max_length: i32, text: *mut BSTR) -> HRESULT {
     if text.is_null() {
         return E_POINTER;
     }
@@ -926,7 +909,7 @@ unsafe extern "system" fn text_range_get_text(
     S_OK
 }
 
-unsafe extern "system" fn text_range_move(
+unsafe fn text_range_move(
     this: *mut c_void,
     unit: TextUnit,
     count: i32,
@@ -959,7 +942,7 @@ unsafe extern "system" fn text_range_move(
     S_OK
 }
 
-unsafe extern "system" fn text_range_move_endpoint_by_unit(
+unsafe fn text_range_move_endpoint_by_unit(
     this: *mut c_void,
     endpoint: TextPatternRangeEndpoint,
     unit: TextUnit,
@@ -993,7 +976,7 @@ unsafe extern "system" fn text_range_move_endpoint_by_unit(
     S_OK
 }
 
-unsafe extern "system" fn text_range_move_endpoint_by_range(
+unsafe fn text_range_move_endpoint_by_range(
     this: *mut c_void,
     endpoint: TextPatternRangeEndpoint,
     target_range: *mut c_void,
@@ -1020,26 +1003,23 @@ unsafe extern "system" fn text_range_move_endpoint_by_range(
     S_OK
 }
 
-unsafe extern "system" fn text_range_select(_this: *mut c_void) -> HRESULT {
+unsafe fn text_range_select(_this: *mut c_void) -> HRESULT {
     E_NOTIMPL
 }
 
-unsafe extern "system" fn text_range_add_to_selection(_this: *mut c_void) -> HRESULT {
+unsafe fn text_range_add_to_selection(_this: *mut c_void) -> HRESULT {
     E_NOTIMPL
 }
 
-unsafe extern "system" fn text_range_remove_from_selection(_this: *mut c_void) -> HRESULT {
+unsafe fn text_range_remove_from_selection(_this: *mut c_void) -> HRESULT {
     E_NOTIMPL
 }
 
-unsafe extern "system" fn text_range_scroll_into_view(_this: *mut c_void, _align: BOOL) -> HRESULT {
+unsafe fn text_range_scroll_into_view(_this: *mut c_void, _align: BOOL) -> HRESULT {
     S_OK
 }
 
-unsafe extern "system" fn text_range_get_children(
-    _this: *mut c_void,
-    children: *mut *mut SAFEARRAY,
-) -> HRESULT {
+unsafe fn text_range_get_children(_this: *mut c_void, children: *mut *mut SAFEARRAY) -> HRESULT {
     if children.is_null() {
         return E_POINTER;
     }
@@ -1048,6 +1028,201 @@ unsafe extern "system" fn text_range_get_children(
     trace_uia("text_range.GetChildren empty");
     S_OK
 }
+
+crate::accessibility::ffi::hresult_boundary!(
+    text_provider_query_interface_ffi => text_provider_query_interface(
+        this: *mut c_void,
+        iid: *const GUID,
+        interface: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::u32_boundary!(
+    text_provider_add_ref_ffi => text_provider_add_ref(this: *mut c_void)
+);
+crate::accessibility::ffi::u32_boundary!(
+    text_provider_release_ffi => text_provider_release(this: *mut c_void)
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_provider_get_selection_ffi => text_provider_get_selection(
+        this: *mut c_void,
+        ranges: *mut *mut SAFEARRAY,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_provider_get_visible_ranges_ffi => text_provider_get_visible_ranges(
+        this: *mut c_void,
+        ranges: *mut *mut SAFEARRAY,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_provider_range_from_child_ffi => text_provider_range_from_child(
+        this: *mut c_void,
+        child: *mut c_void,
+        range: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_provider_range_from_point_ffi => text_provider_range_from_point(
+        this: *mut c_void,
+        point: UiaPoint,
+        range: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_provider_document_range_ffi => text_provider_document_range(
+        this: *mut c_void,
+        range: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_provider_supported_text_selection_ffi => text_provider_supported_text_selection(
+        this: *mut c_void,
+        selection: *mut SupportedTextSelection,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_provider_range_from_annotation_ffi => text_provider_range_from_annotation(
+        this: *mut c_void,
+        annotation: *mut c_void,
+        range: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_provider_get_caret_range_ffi => text_provider_get_caret_range(
+        this: *mut c_void,
+        is_active: *mut BOOL,
+        range: *mut *mut c_void,
+    )
+);
+
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_query_interface_ffi => text_range_query_interface(
+        this: *mut c_void,
+        iid: *const GUID,
+        interface: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::u32_boundary!(
+    text_range_add_ref_ffi => text_range_add_ref(this: *mut c_void)
+);
+crate::accessibility::ffi::u32_boundary!(
+    text_range_release_ffi => text_range_release(this: *mut c_void)
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_clone_ffi => text_range_clone(this: *mut c_void, range: *mut *mut c_void)
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_compare_ffi => text_range_compare(
+        this: *mut c_void,
+        other: *mut c_void,
+        equal: *mut BOOL,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_compare_endpoints_ffi => text_range_compare_endpoints(
+        this: *mut c_void,
+        endpoint: TextPatternRangeEndpoint,
+        target_range: *mut c_void,
+        target_endpoint: TextPatternRangeEndpoint,
+        comparison: *mut i32,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_expand_to_enclosing_unit_ffi => text_range_expand_to_enclosing_unit(
+        this: *mut c_void,
+        unit: TextUnit,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_find_attribute_ffi => text_range_find_attribute(
+        this: *mut c_void,
+        attribute_id: UIA_TEXTATTRIBUTE_ID,
+        value: VARIANT,
+        backward: BOOL,
+        range: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_find_text_ffi => text_range_find_text(
+        this: *mut c_void,
+        text: BSTR,
+        backward: BOOL,
+        ignore_case: BOOL,
+        range: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_get_attribute_value_ffi => text_range_get_attribute_value(
+        this: *mut c_void,
+        attribute_id: UIA_TEXTATTRIBUTE_ID,
+        value: *mut VARIANT,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_get_bounding_rectangles_ffi => text_range_get_bounding_rectangles(
+        this: *mut c_void,
+        rectangles: *mut *mut SAFEARRAY,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_get_enclosing_element_ffi => text_range_get_enclosing_element(
+        this: *mut c_void,
+        provider: *mut *mut c_void,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_get_text_ffi => text_range_get_text(
+        this: *mut c_void,
+        max_length: i32,
+        text: *mut BSTR,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_move_ffi => text_range_move(
+        this: *mut c_void,
+        unit: TextUnit,
+        count: i32,
+        moved: *mut i32,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_move_endpoint_by_unit_ffi => text_range_move_endpoint_by_unit(
+        this: *mut c_void,
+        endpoint: TextPatternRangeEndpoint,
+        unit: TextUnit,
+        count: i32,
+        moved: *mut i32,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_move_endpoint_by_range_ffi => text_range_move_endpoint_by_range(
+        this: *mut c_void,
+        endpoint: TextPatternRangeEndpoint,
+        target_range: *mut c_void,
+        target_endpoint: TextPatternRangeEndpoint,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_select_ffi => text_range_select(this: *mut c_void)
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_add_to_selection_ffi => text_range_add_to_selection(this: *mut c_void)
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_remove_from_selection_ffi => text_range_remove_from_selection(this: *mut c_void)
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_scroll_into_view_ffi => text_range_scroll_into_view(
+        this: *mut c_void,
+        align: BOOL,
+    )
+);
+crate::accessibility::ffi::hresult_boundary!(
+    text_range_get_children_ffi => text_range_get_children(
+        this: *mut c_void,
+        children: *mut *mut SAFEARRAY,
+    )
+);
 
 unsafe fn single_unknown_safearray(value: *mut c_void) -> *mut SAFEARRAY {
     let array = unsafe { SafeArrayCreateVector(VT_UNKNOWN, 0, 1) };
@@ -1463,6 +1638,29 @@ mod tests {
             super::text_range_release(second_range);
             (first_vtable.release)(first_provider.as_ptr().cast());
             (second_vtable.release)(second_provider.as_ptr().cast());
+        }
+    }
+
+    #[test]
+    fn poisoned_provider_state_is_contained() {
+        let provider = RawTextProvider::allocate("text".to_owned());
+        let raw_provider = provider.as_ptr().cast();
+        let vtable = unsafe { (*provider.as_ptr()).vtable };
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            let _state = (*provider.as_ptr()).state.write().unwrap();
+            panic!("poison provider state");
+        }));
+        assert!(poisoned.is_err());
+
+        unsafe {
+            let mut range = ptr::null_mut();
+            assert_eq!(
+                (vtable.document_range)(raw_provider, &mut range),
+                windows_sys::Win32::Foundation::E_FAIL,
+            );
+            assert!(range.is_null());
+            (vtable.release)(raw_provider);
         }
     }
 
