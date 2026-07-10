@@ -293,7 +293,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 /// The key sequences for `APP_KEYPAD` and alike are handled inside the bindings.
 #[inline(never)]
 fn build_sequence(key: KeyEvent, mods: ModifiersState, mode: TermMode) -> Vec<u8> {
-    if let Some(control) = control_character_fallback(&key.logical_key, key.state, mods, mode) {
+    let text_missing = key.text_with_all_modifiers().is_none_or(str::is_empty);
+    if let Some(control) =
+        windows_control_j_fallback(&key.logical_key, key.state, mods, mode, text_missing)
+    {
         return vec![control];
     }
 
@@ -721,41 +724,24 @@ fn is_control_character(text: &str) -> bool {
     text.len() == 1 && (codepoint < 0x20 || (0x7f..=0x9f).contains(&codepoint))
 }
 
-fn control_character_fallback(
+fn windows_control_j_fallback(
     key: &Key,
     state: ElementState,
     mods: ModifiersState,
     mode: TermMode,
+    text_missing: bool,
 ) -> Option<u8> {
-    if state == ElementState::Released {
+    if !cfg!(windows)
+        || !text_missing
+        || state == ElementState::Released
+        || mods != ModifiersState::CONTROL
+        || mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL)
+        || !matches!(key, Key::Character(character) if character == "j")
+    {
         return None;
     }
 
-    if mods != ModifiersState::CONTROL {
-        return None;
-    }
-
-    let Key::Character(character) = key else {
-        return None;
-    };
-
-    if character.len() != 1 {
-        return None;
-    }
-
-    let byte = character.as_bytes()[0];
-    let control = if byte.is_ascii_alphabetic() {
-        byte.to_ascii_lowercase() - b'a' + 1
-    } else if (0x01..=0x1a).contains(&byte) {
-        byte
-    } else {
-        return None;
-    };
-    if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) && control != b'\n' {
-        return None;
-    }
-
-    Some(control)
+    Some(b'\n')
 }
 
 #[cfg(test)]
@@ -763,101 +749,85 @@ mod tests {
     use super::*;
 
     #[test]
-    fn control_j_with_empty_text_maps_to_line_feed() {
+    fn control_j_windows_missing_text_fallback() {
+        let expected = cfg!(windows).then_some(b'\n');
         assert_eq!(
-            control_character_fallback(
+            windows_control_j_fallback(
                 &Key::Character("j".into()),
                 ElementState::Pressed,
                 ModifiersState::CONTROL,
-                TermMode::empty()
+                TermMode::empty(),
+                true,
             ),
-            Some(b'\n')
+            expected
         );
-    }
-
-    #[test]
-    fn control_j_in_disambiguate_mode_stays_line_feed() {
         assert_eq!(
-            control_character_fallback(
+            windows_control_j_fallback(
                 &Key::Character("j".into()),
                 ElementState::Pressed,
                 ModifiersState::CONTROL,
-                TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES
+                TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES,
+                true,
             ),
-            Some(b'\n')
+            None
         );
-    }
-
-    #[test]
-    fn control_j_reported_as_c0_line_feed_stays_line_feed() {
         assert_eq!(
-            control_character_fallback(
+            windows_control_j_fallback(
                 &Key::Character("\n".into()),
                 ElementState::Pressed,
                 ModifiersState::CONTROL,
-                TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES
-            ),
-            Some(b'\n')
-        );
-    }
-
-    #[test]
-    fn control_j_in_report_all_keys_mode_stays_line_feed() {
-        assert_eq!(
-            control_character_fallback(
-                &Key::Character("j".into()),
-                ElementState::Pressed,
-                ModifiersState::CONTROL,
-                TermMode::REPORT_ALL_KEYS_AS_ESC
-            ),
-            Some(b'\n')
-        );
-    }
-
-    #[test]
-    fn control_character_fallback_requires_plain_control_letter() {
-        assert_eq!(
-            control_character_fallback(
-                &Key::Character("j".into()),
-                ElementState::Pressed,
-                ModifiersState::ALT,
-                TermMode::empty()
+                TermMode::empty(),
+                true,
             ),
             None
         );
         assert_eq!(
-            control_character_fallback(
+            windows_control_j_fallback(
+                &Key::Character("j".into()),
+                ElementState::Pressed,
+                ModifiersState::CONTROL,
+                TermMode::REPORT_ALL_KEYS_AS_ESC,
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            windows_control_j_fallback(
                 &Key::Character("j".into()),
                 ElementState::Pressed,
                 ModifiersState::CONTROL | ModifiersState::SHIFT,
-                TermMode::empty()
+                TermMode::empty(),
+                true,
             ),
             None
         );
         assert_eq!(
-            control_character_fallback(
-                &Key::Character("1".into()),
-                ElementState::Pressed,
-                ModifiersState::CONTROL,
-                TermMode::empty()
-            ),
-            None
-        );
-        assert_eq!(
-            control_character_fallback(
+            windows_control_j_fallback(
                 &Key::Character("c".into()),
                 ElementState::Pressed,
                 ModifiersState::CONTROL,
-                TermMode::REPORT_ALL_KEYS_AS_ESC
+                TermMode::empty(),
+                true,
             ),
             None
         );
         assert_eq!(
-            control_character_fallback(
+            windows_control_j_fallback(
                 &Key::Character("j".into()),
                 ElementState::Released,
                 ModifiersState::CONTROL,
-                TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES
+                TermMode::empty(),
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            windows_control_j_fallback(
+                &Key::Character("j".into()),
+                ElementState::Pressed,
+                ModifiersState::CONTROL,
+                TermMode::empty(),
+                false,
             ),
             None
         );
