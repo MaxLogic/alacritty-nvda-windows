@@ -1692,15 +1692,42 @@ mod tests {
     }
 
     #[test]
-    fn text_provider_reports_single_selection_support() {
-        let provider = RawTextProvider::allocate("text".to_owned());
+    fn text_pattern_capabilities_match_implementation() {
+        let provider = RawTextProvider::allocate("visible viewport".to_owned());
         let raw_provider = provider.as_ptr().cast();
         let vtable = unsafe { (*provider.as_ptr()).vtable };
 
         unsafe {
+            (*provider.as_ptr()).set_focused(true);
+
             let mut selection = 1;
             assert_eq!((vtable.supported_text_selection)(raw_provider, &mut selection), 0);
             assert_eq!(selection, SupportedTextSelection_Multiple);
+
+            let mut document_range = ptr::null_mut();
+            assert_eq!((vtable.document_range)(raw_provider, &mut document_range), S_OK);
+            let range_vtable = *(document_range as *mut &'static super::RawTextRangeVtable);
+            let mut text: BSTR = ptr::null_mut();
+            assert_eq!((range_vtable.get_text)(document_range, -1, &mut text), S_OK);
+            assert_eq!(
+                String::from_utf16_lossy(std::slice::from_raw_parts(
+                    text,
+                    SysStringLen(text) as usize,
+                )),
+                "visible viewport"
+            );
+            SysFreeString(text);
+            let mut is_active = 0;
+            let mut caret_range = ptr::null_mut();
+            assert_eq!(
+                (vtable.get_caret_range)(raw_provider, &mut is_active, &mut caret_range),
+                S_OK
+            );
+            assert_eq!(is_active, 1);
+            assert!(!caret_range.is_null());
+
+            (range_vtable.release)(caret_range);
+            (range_vtable.release)(document_range);
             (vtable.release)(raw_provider);
         }
     }

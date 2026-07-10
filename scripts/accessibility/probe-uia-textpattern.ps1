@@ -14,6 +14,161 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName WindowsBase
 
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class AlacrittyTextPattern2Probe {
+    private const int UiaTextPattern2Id = 10024;
+    private const int GetCaretRangeVtableIndex = 10;
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int GetCaretRangeDelegate(
+        IntPtr pattern,
+        out int isActive,
+        out IntPtr range
+    );
+
+    [ComImport]
+    [Guid("ff48dba4-60ef-4201-aa87-54103eef594e")]
+    private class CUIAutomation {
+    }
+
+    [ComImport]
+    [Guid("30cbe57d-d9d0-452a-ab13-7ac5ac4825ee")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IUIAutomation {
+        [PreserveSig]
+        int CompareElements(IntPtr first, IntPtr second, out int areSame);
+
+        [PreserveSig]
+        int CompareRuntimeIds(IntPtr first, IntPtr second, out int areSame);
+
+        [PreserveSig]
+        int GetRootElement(out IntPtr root);
+
+        [PreserveSig]
+        int ElementFromHandle(
+            IntPtr hwnd,
+            [MarshalAs(UnmanagedType.Interface)] out IUIAutomationElement element
+        );
+    }
+
+    [ComImport]
+    [Guid("d22108aa-8ac5-49a5-837b-37bbb3d7591e")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IUIAutomationElement {
+        [PreserveSig]
+        int SetFocus();
+        [PreserveSig]
+        int GetRuntimeId(out IntPtr runtimeId);
+        [PreserveSig]
+        int FindFirst(int scope, IntPtr condition, out IntPtr found);
+        [PreserveSig]
+        int FindAll(int scope, IntPtr condition, out IntPtr found);
+        [PreserveSig]
+        int FindFirstBuildCache(
+            int scope,
+            IntPtr condition,
+            IntPtr cacheRequest,
+            out IntPtr found
+        );
+        [PreserveSig]
+        int FindAllBuildCache(
+            int scope,
+            IntPtr condition,
+            IntPtr cacheRequest,
+            out IntPtr found
+        );
+        [PreserveSig]
+        int BuildUpdatedCache(IntPtr cacheRequest, out IntPtr updatedElement);
+        [PreserveSig]
+        int GetCurrentPropertyValue(
+            int propertyId,
+            [MarshalAs(UnmanagedType.Struct)] out object value
+        );
+        [PreserveSig]
+        int GetCurrentPropertyValueEx(
+            int propertyId,
+            int ignoreDefaultValue,
+            [MarshalAs(UnmanagedType.Struct)] out object value
+        );
+        [PreserveSig]
+        int GetCachedPropertyValue(
+            int propertyId,
+            [MarshalAs(UnmanagedType.Struct)] out object value
+        );
+        [PreserveSig]
+        int GetCachedPropertyValueEx(
+            int propertyId,
+            int ignoreDefaultValue,
+            [MarshalAs(UnmanagedType.Struct)] out object value
+        );
+        [PreserveSig]
+        int GetCurrentPatternAs(
+            int patternId,
+            ref Guid interfaceId,
+            out IntPtr patternObject
+        );
+    }
+
+    public static bool GetCaretIsActive(IntPtr hwnd) {
+        object automationObject = null;
+        IUIAutomationElement element = null;
+        IntPtr patternPointer = IntPtr.Zero;
+        IntPtr rangePointer = IntPtr.Zero;
+        try {
+            automationObject = new CUIAutomation();
+            var automation = (IUIAutomation)automationObject;
+            int hr = automation.ElementFromHandle(hwnd, out element);
+            Marshal.ThrowExceptionForHR(hr);
+
+            Guid patternId = new Guid("506a921a-fcc9-409f-b23b-37eb74106872");
+            hr = element.GetCurrentPatternAs(
+                UiaTextPattern2Id,
+                ref patternId,
+                out patternPointer
+            );
+            Marshal.ThrowExceptionForHR(hr);
+            if (patternPointer == IntPtr.Zero) {
+                throw new InvalidOperationException("TextPattern2 provider is unavailable.");
+            }
+            IntPtr vtable = Marshal.ReadIntPtr(patternPointer);
+            IntPtr getCaretRangePointer = Marshal.ReadIntPtr(
+                vtable,
+                GetCaretRangeVtableIndex * IntPtr.Size
+            );
+            var getCaretRange = (GetCaretRangeDelegate)Marshal.GetDelegateForFunctionPointer(
+                getCaretRangePointer,
+                typeof(GetCaretRangeDelegate)
+            );
+
+            int isActive;
+            hr = getCaretRange(patternPointer, out isActive, out rangePointer);
+            Marshal.ThrowExceptionForHR(hr);
+            if (rangePointer == IntPtr.Zero) {
+                throw new InvalidOperationException("GetCaretRange returned no range.");
+            }
+            return isActive != 0;
+        }
+        finally {
+            if (rangePointer != IntPtr.Zero) {
+                Marshal.Release(rangePointer);
+            }
+            if (patternPointer != IntPtr.Zero) {
+                Marshal.Release(patternPointer);
+            }
+            if (element != null && Marshal.IsComObject(element)) {
+                Marshal.ReleaseComObject(element);
+            }
+            if (automationObject != null && Marshal.IsComObject(automationObject)) {
+                Marshal.ReleaseComObject(automationObject);
+            }
+        }
+    }
+}
+"@
+
 if ($VerifyBackgroundRefresh) {
     Add-Type -TypeDefinition @"
 using System;
@@ -107,10 +262,34 @@ $visibleRanges = $pattern.GetVisibleRanges()
 if ($null -eq $visibleRanges -or $visibleRanges.Count -lt 1) {
     Write-Error "GetVisibleRanges returned no visible ranges."
 }
+$visibleText = ($visibleRanges | ForEach-Object { $_.GetText(-1) }) -join ""
+if ($visibleText -ne $documentText) {
+    Write-Error "DocumentRange includes text outside the reported visible ranges."
+}
 
 $selection = $pattern.GetSelection()
-if ($null -eq $selection) {
-    Write-Error "GetSelection returned null."
+if ($null -eq $selection -or $selection.Count -lt 1) {
+    Write-Error "GetSelection returned no readable ranges."
+}
+foreach ($range in $selection) {
+    if ($null -eq $range.GetText(-1)) {
+        Write-Error "GetSelection returned an unreadable range."
+    }
+}
+
+if (
+    $pattern.SupportedTextSelection `
+        -ne [System.Windows.Automation.SupportedTextSelection]::Multiple
+) {
+    Write-Error "SupportedTextSelection must report Multiple for block selections."
+}
+
+$caretIsActive = [AlacrittyTextPattern2Probe]::GetCaretIsActive(
+    [IntPtr]$window.Current.NativeWindowHandle
+)
+$expectedCaretIsActive = $window.Current.HasKeyboardFocus
+if ($caretIsActive -ne $expectedCaretIsActive) {
+    Write-Error "TextPattern2 caret activity does not match window focus."
 }
 
 if ($VerifyBackgroundRefresh) {
@@ -264,6 +443,9 @@ if ($VerifyBackgroundRefresh) {
 }
 
 Write-Output "TextPattern.Available: PASS"
-Write-Output "DocumentRange.GetText: PASS"
+Write-Output "Provider Name: PASS ($($window.Current.Name))"
+Write-Output "Viewport DocumentRange.GetText: PASS"
 Write-Output "GetVisibleRanges: PASS"
-Write-Output "GetSelection: PASS"
+Write-Output "GetSelection readable ranges: PASS"
+Write-Output "TextPattern2.GetCaretRange: PASS"
+Write-Output "SupportedTextSelection.Multiple: PASS"

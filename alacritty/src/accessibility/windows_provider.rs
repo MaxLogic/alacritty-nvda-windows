@@ -1516,6 +1516,15 @@ mod tests {
     }
 
     #[test]
+    fn provider_name_tracks_title() {
+        let provider = TerminalProvider::new("initial");
+
+        assert_eq!(provider.set_name("dynamic"), Some("initial".to_owned()));
+        assert_eq!(provider.property_bstr(UIA_NamePropertyId).as_deref(), Some("dynamic"));
+        assert_eq!(provider.set_name("dynamic"), None);
+    }
+
+    #[test]
     fn accessibility_invalidation_matrix() {
         let base = PublishedSnapshotState {
             snapshot: VisibleTerminalSnapshot::from_text_for_tests("text", 80, 24),
