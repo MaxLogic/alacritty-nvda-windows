@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::EventListener;
@@ -31,7 +31,10 @@ use windows_sys::Win32::UI::Accessibility::{
     UiaRootObjectId,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, OBJID_CLIENT, WM_GETOBJECT};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetClientRect, ISMEX_SEND, InSendMessageEx, OBJID_CLIENT, PostMessageW, WM_APP, WM_GETOBJECT,
+    WM_NCDESTROY,
+};
 use windows_sys::core::{BSTR, GUID, HRESULT};
 use winit::raw_window_handle::RawWindowHandle;
 
@@ -47,6 +50,7 @@ const IID_IRAW_ELEMENT_PROVIDER_ADVISE_EVENTS: GUID =
 const IID_IRAW_ELEMENT_PROVIDER_SIMPLE: GUID =
     GUID::from_u128(0xd6dd68d1_86fd_4332_8666_9abedea2d24c);
 const SUBCLASS_ID: usize = 1;
+const DEFERRED_TEARDOWN_MESSAGE: u32 = WM_APP + 0x0a11;
 const UIA_EVENT_THROTTLE: Duration = Duration::from_millis(75);
 const MAX_NOTIFICATION_CHARS: usize = 4000;
 
@@ -351,6 +355,11 @@ impl WindowsAccessibility {
             }
             None
         } else {
+            unsafe {
+                // SAFETY: The installed subclass retains its own provider reference until it is
+                // removed explicitly or receives `WM_NCDESTROY`.
+                add_ref(provider.as_ptr().cast());
+            }
             trace_uia("accessibility.new SetWindowSubclass installed");
             Some(Self {
                 hwnd,
@@ -494,13 +503,70 @@ impl Drop for WindowsAccessibility {
     fn drop(&mut self) {
         unsafe {
             // SAFETY: `provider` and the subclass were installed together in `new` for this
-            // HWND. Dropping `WindowsAccessibility` disconnects UIA and removes the subclass
-            // before releasing the owning COM reference.
-            UiaDisconnectProvider(self.raw_provider());
-            RemoveWindowSubclass(self.hwnd, Some(accessibility_subclass_proc_ffi), SUBCLASS_ID);
-            release(self.raw_provider());
+            // HWND. Teardown makes the provider unavailable and removes the subclass before the
+            // potentially re-entrant UIA disconnect, then releases the owning COM reference.
+            if InSendMessageEx(ptr::null()) & ISMEX_SEND != 0 {
+                (*self.provider.as_ptr()).defer_teardown();
+                if PostMessageW(self.hwnd, DEFERRED_TEARDOWN_MESSAGE, 0, 0) == 0 {
+                    trace_uia("accessibility.drop deferred teardown PostMessageW failed");
+                }
+            } else {
+                finish_provider_teardown(self.hwnd, self.provider, false);
+            }
         }
     }
+}
+
+unsafe fn finish_provider_teardown(
+    hwnd: HWND,
+    provider: NonNull<RawProvider>,
+    final_window_callback: bool,
+) {
+    let result = unsafe {
+        teardown_provider(
+            provider,
+            || {
+                let removed =
+                    RemoveWindowSubclass(hwnd, Some(accessibility_subclass_proc_ffi), SUBCLASS_ID)
+                        != 0;
+                if !removed {
+                    trace_uia("accessibility.drop RemoveWindowSubclass failed");
+                }
+                removed
+            },
+            |provider| UiaDisconnectProvider(provider),
+            final_window_callback,
+        )
+    };
+    if result != S_OK {
+        trace_uia(&format!(
+            "accessibility.drop UiaDisconnectProvider failed result={result:#010x}"
+        ));
+    }
+}
+
+unsafe fn teardown_provider(
+    provider: NonNull<RawProvider>,
+    remove_subclass: impl FnOnce() -> bool,
+    disconnect_provider: impl FnOnce(*mut c_void) -> HRESULT,
+    final_window_callback: bool,
+) -> HRESULT {
+    let raw_provider = provider.as_ptr();
+    unsafe {
+        (*raw_provider).available.store(false, Ordering::Release);
+    }
+    if remove_subclass() || final_window_callback {
+        unsafe {
+            // SAFETY: Successful subclass removal transfers its retained provider reference
+            // back to teardown. On failure, `WM_NCDESTROY` releases that reference instead.
+            release(raw_provider.cast());
+        }
+    }
+    let result = disconnect_provider(raw_provider.cast());
+    unsafe {
+        release(raw_provider.cast());
+    }
+    result
 }
 
 /// Whether a Windows message is a UIA client-object provider request.
@@ -524,19 +590,63 @@ unsafe fn accessibility_subclass_proc(
     _subclass_id: usize,
     ref_data: usize,
 ) -> LRESULT {
-    if should_handle_wm_getobject(message, lparam) {
-        let provider = ref_data as *mut RawProvider;
-        if !provider.is_null() {
-            return unsafe {
-                // SAFETY: `ref_data` is the `RawProvider` pointer passed to
-                // `SetWindowSubclass` in `WindowsAccessibility::new`; the subclass is removed
-                // before the provider reference is released.
-                UiaReturnRawElementProvider(hwnd, wparam, lparam, (*provider).as_raw())
-            };
+    if message == DEFERRED_TEARDOWN_MESSAGE {
+        if let Some(provider) = unsafe { take_deferred_teardown(ref_data) } {
+            unsafe {
+                finish_provider_teardown(hwnd, provider, false);
+            }
+            return 0;
         }
     }
 
+    if message == WM_NCDESTROY && ref_data != 0 {
+        if let Some(provider) = unsafe { take_deferred_teardown(ref_data) } {
+            unsafe {
+                // SAFETY: The deferred owner and subclass references keep `provider` alive until
+                // this final window callback completes teardown.
+                finish_provider_teardown(hwnd, provider, true);
+            }
+        } else {
+            unsafe {
+                // SAFETY: `WM_NCDESTROY` is the last callback for the installed subclass. This
+                // releases the reference retained after successful `SetWindowSubclass`.
+                RemoveWindowSubclass(hwnd, Some(accessibility_subclass_proc_ffi), SUBCLASS_ID);
+                release((ref_data as *mut RawProvider).cast());
+            }
+        }
+
+        return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+    }
+
+    if let Some(provider) = unsafe { provider_for_getobject(message, lparam, ref_data) } {
+        return unsafe {
+            // SAFETY: `ref_data` is the `RawProvider` pointer passed to `SetWindowSubclass` in
+            // `WindowsAccessibility::new`; the subclass owns a reference until it is removed or
+            // receives `WM_NCDESTROY`.
+            UiaReturnRawElementProvider(hwnd, wparam, lparam, provider)
+        };
+    }
+
     unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+}
+
+unsafe fn provider_for_getobject(
+    message: u32,
+    lparam: LPARAM,
+    ref_data: usize,
+) -> Option<*mut c_void> {
+    if !should_handle_wm_getobject(message, lparam) {
+        return None;
+    }
+    let provider = unsafe { (ref_data as *mut RawProvider).as_ref()? };
+    provider.available.load(Ordering::Acquire).then(|| provider.as_raw())
+}
+
+unsafe fn take_deferred_teardown(ref_data: usize) -> Option<NonNull<RawProvider>> {
+    let provider = NonNull::new(ref_data as *mut RawProvider)?;
+    unsafe {
+        (*provider.as_ptr()).teardown_deferred.swap(false, Ordering::AcqRel).then_some(provider)
+    }
 }
 
 unsafe extern "system" fn accessibility_subclass_proc_ffi(
@@ -567,6 +677,8 @@ struct RawProvider {
     vtable: &'static RawProviderVtable,
     advise_events: RawProviderAdviseEvents,
     ref_count: AtomicU32,
+    available: AtomicBool,
+    teardown_deferred: AtomicBool,
     hwnd: HWND,
     provider: TerminalProvider,
     text_provider: NonNull<RawTextProvider>,
@@ -583,6 +695,8 @@ impl RawProvider {
             vtable: &RAW_PROVIDER_VTABLE,
             advise_events: RawProviderAdviseEvents::new(),
             ref_count: AtomicU32::new(1),
+            available: AtomicBool::new(true),
+            teardown_deferred: AtomicBool::new(false),
             hwnd,
             provider,
             text_provider,
@@ -620,6 +734,11 @@ impl RawProvider {
 
     fn as_raw(&self) -> *mut c_void {
         self as *const Self as *mut c_void
+    }
+
+    fn defer_teardown(&self) {
+        self.available.store(false, Ordering::Release);
+        self.teardown_deferred.store(true, Ordering::Release);
     }
 
     unsafe fn set_enclosing_provider(&mut self) {
@@ -1202,11 +1321,12 @@ fn string_to_bstr(value: &str) -> BSTR {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::num::NonZeroIsize;
 
     use winit::raw_window_handle::{RawWindowHandle, Win32WindowHandle};
 
-    use windows_sys::Win32::Foundation::VARIANT_TRUE;
+    use windows_sys::Win32::Foundation::{E_FAIL, S_OK, VARIANT_TRUE};
     use windows_sys::Win32::System::Variant::{VT_BOOL, VT_BSTR, VT_I4, VariantClear};
     use windows_sys::Win32::UI::Accessibility::{
         ProviderOptions_ServerSideProvider, UIA_ControlTypePropertyId,
@@ -1218,8 +1338,9 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{OBJID_CLIENT, WM_GETOBJECT};
 
     use super::{
-        RawProvider, TerminalProvider, accessibility_cursor, hwnd_from_raw_window_handle,
-        output_notification_text, release, should_handle_wm_getobject,
+        RawProvider, TerminalProvider, accessibility_cursor, add_ref, hwnd_from_raw_window_handle,
+        output_notification_text, provider_for_getobject, release, should_handle_wm_getobject,
+        take_deferred_teardown, teardown_provider,
     };
     use alacritty_terminal::index::{Column, Point};
 
@@ -1415,6 +1536,145 @@ mod tests {
             assert_eq!((vtable.release)(raw_provider), 1);
             assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 0);
             assert_eq!((vtable.release)(raw_provider), 0);
+        }
+
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn provider_teardown_disables_getobject_before_disconnect() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = RawProvider::allocate_with_drop_counter(
+            42 as _,
+            TerminalProvider::new("Alacritty"),
+            std::sync::Arc::clone(&dropped),
+        );
+        let ref_data = provider.as_ptr() as usize;
+        let subclass_removed = Cell::new(false);
+
+        unsafe {
+            assert_eq!(add_ref(provider.as_ptr().cast()), 2);
+            assert!(
+                provider_for_getobject(WM_GETOBJECT, UiaRootObjectId as isize, ref_data).is_some()
+            );
+            teardown_provider(
+                provider,
+                || {
+                    assert!(
+                        provider_for_getobject(WM_GETOBJECT, UiaRootObjectId as isize, ref_data)
+                            .is_none()
+                    );
+                    subclass_removed.set(true);
+                    true
+                },
+                |raw_provider| {
+                    assert!(subclass_removed.get());
+                    assert!(
+                        provider_for_getobject(WM_GETOBJECT, UiaRootObjectId as isize, ref_data)
+                            .is_none()
+                    );
+                    assert_eq!(raw_provider, provider.as_ptr().cast());
+                    assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 0);
+                    S_OK
+                },
+                false,
+            );
+        }
+
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn provider_teardown_keeps_provider_alive_when_subclass_removal_fails() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = RawProvider::allocate_with_drop_counter(
+            42 as _,
+            TerminalProvider::new("Alacritty"),
+            std::sync::Arc::clone(&dropped),
+        );
+        let ref_data = provider.as_ptr() as usize;
+        let disconnect_called = Cell::new(false);
+
+        unsafe {
+            assert_eq!(add_ref(provider.as_ptr().cast()), 2);
+            teardown_provider(
+                provider,
+                || false,
+                |_| {
+                    disconnect_called.set(true);
+                    S_OK
+                },
+                false,
+            );
+
+            assert!(disconnect_called.get());
+            assert!(
+                provider_for_getobject(WM_GETOBJECT, UiaRootObjectId as isize, ref_data).is_none()
+            );
+            assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+            // Simulate the subclass releasing its retained reference at `WM_NCDESTROY`.
+            assert_eq!(release(provider.as_ptr().cast()), 0);
+        }
+
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn provider_teardown_releases_owner_after_disconnect_failure() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = RawProvider::allocate_with_drop_counter(
+            42 as _,
+            TerminalProvider::new("Alacritty"),
+            std::sync::Arc::clone(&dropped),
+        );
+
+        unsafe {
+            assert_eq!(add_ref(provider.as_ptr().cast()), 2);
+            assert_eq!(teardown_provider(provider, || true, |_| E_FAIL, false), E_FAIL);
+        }
+
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn provider_teardown_defers_until_a_posted_window_message() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = RawProvider::allocate_with_drop_counter(
+            42 as _,
+            TerminalProvider::new("Alacritty"),
+            std::sync::Arc::clone(&dropped),
+        );
+        let ref_data = provider.as_ptr() as usize;
+
+        unsafe {
+            assert_eq!(add_ref(provider.as_ptr().cast()), 2);
+            (*provider.as_ptr()).defer_teardown();
+
+            assert!(
+                provider_for_getobject(WM_GETOBJECT, UiaRootObjectId as isize, ref_data).is_none()
+            );
+            assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+            let deferred = take_deferred_teardown(ref_data).unwrap();
+            assert_eq!(teardown_provider(deferred, || true, |_| S_OK, false), S_OK);
+        }
+
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn provider_teardown_releases_subclass_on_final_window_callback() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = RawProvider::allocate_with_drop_counter(
+            42 as _,
+            TerminalProvider::new("Alacritty"),
+            std::sync::Arc::clone(&dropped),
+        );
+
+        unsafe {
+            assert_eq!(add_ref(provider.as_ptr().cast()), 2);
+            assert_eq!(teardown_provider(provider, || false, |_| S_OK, true), S_OK);
         }
 
         assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
