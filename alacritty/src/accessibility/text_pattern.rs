@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::ptr;
 use std::ptr::NonNull;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use alacritty_terminal::index::Point;
 use windows_sys::Win32::Foundation::{BOOL, E_FAIL, HWND, S_OK, SysAllocStringLen};
@@ -33,6 +33,7 @@ const IID_IUNKNOWN: GUID = GUID::from_u128(0x00000000_0000_0000_c000_00000000004
 const IID_ITEXT_PROVIDER: GUID = GUID::from_u128(0x3589c92c_63f3_4367_99bb_ada653b77cf2);
 const IID_ITEXT_PROVIDER2: GUID = GUID::from_u128(0x0dc5e6ed_3e16_4bf1_8f9a_a979878bc195);
 const IID_ITEXT_RANGE_PROVIDER: GUID = GUID::from_u128(0x5347ad7b_c355_46f8_aff5_909033582f63);
+static NEXT_TEXT_PROVIDER_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn trace_uia(message: &str) {
     if let Ok(path) = std::env::var("ALACRITTY_UIA_DEBUG_TRACE") {
@@ -53,6 +54,7 @@ pub struct RawTextProvider {
     state: RwLock<TextProviderState>,
     hwnd: HWND,
     enclosing_provider: AtomicPtr<c_void>,
+    generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +163,7 @@ impl RawTextProvider {
             state: RwLock::new(TextProviderState::from_text(text)),
             hwnd,
             enclosing_provider: AtomicPtr::new(enclosing_provider),
+            generation: NEXT_TEXT_PROVIDER_GENERATION.fetch_add(1, Ordering::Relaxed),
         });
         NonNull::from(Box::leak(provider))
     }
@@ -259,9 +262,15 @@ impl RawTextProvider {
         let state = self.state.read().expect("text provider lock poisoned");
         let offset = state.cursor_offset();
         trace_uia(&format!("text_provider.GetCaretRange offset={offset}"));
-        RawTextRange::allocate(state.text.clone(), offset, offset, self.enclosing_provider())
-            .as_ptr()
-            .cast()
+        RawTextRange::allocate(
+            state.text.clone(),
+            offset,
+            offset,
+            self.enclosing_provider(),
+            self.generation,
+        )
+        .as_ptr()
+        .cast()
     }
 }
 
@@ -376,6 +385,7 @@ unsafe extern "system" fn text_provider_get_selection(
             clamp_to_boundary(&text, start),
             clamp_to_boundary(&text, end),
             provider.enclosing_provider(),
+            provider.generation,
         );
         let index = index as i32;
         // SAFETY: The SAFEARRAY stores VT_UNKNOWN interface pointers. `SafeArrayPutElement`
@@ -410,7 +420,8 @@ unsafe extern "system" fn text_provider_get_visible_ranges(
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let text = provider.text();
     let end = text.len();
-    let range = RawTextRange::allocate(text, 0, end, provider.enclosing_provider());
+    let range =
+        RawTextRange::allocate(text, 0, end, provider.enclosing_provider(), provider.generation);
     // SAFETY: `single_unknown_safearray` stores the AddRef'd COM range in a VT_UNKNOWN SAFEARRAY;
     // the local reference is released immediately after the array takes its reference.
     let array = unsafe { single_unknown_safearray(range.as_ptr().cast()) };
@@ -447,7 +458,13 @@ unsafe extern "system" fn text_provider_range_from_point(
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let (text, offset) = provider.range_from_point(point);
     trace_uia(&format!("text_provider.RangeFromPoint offset={offset}"));
-    let text_range = RawTextRange::allocate(text, offset, offset, provider.enclosing_provider());
+    let text_range = RawTextRange::allocate(
+        text,
+        offset,
+        offset,
+        provider.enclosing_provider(),
+        provider.generation,
+    );
     unsafe { *range = text_range.as_ptr().cast() };
     S_OK
 }
@@ -463,8 +480,13 @@ unsafe extern "system" fn text_provider_document_range(
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let text = provider.text();
     trace_uia(&format!("text_provider.DocumentRange len={}", text.len()));
-    let text_range =
-        RawTextRange::allocate(text.clone(), 0, text.len(), provider.enclosing_provider());
+    let text_range = RawTextRange::allocate(
+        text.clone(),
+        0,
+        text.len(),
+        provider.enclosing_provider(),
+        provider.generation,
+    );
     unsafe { *range = text_range.as_ptr().cast() };
     S_OK
 }
@@ -520,6 +542,7 @@ pub(crate) struct RawTextRange {
     start: usize,
     end: usize,
     enclosing_provider: *mut c_void,
+    provider_generation: u64,
 }
 
 impl RawTextRange {
@@ -528,6 +551,7 @@ impl RawTextRange {
         start: usize,
         end: usize,
         enclosing_provider: *mut c_void,
+        provider_generation: u64,
     ) -> NonNull<Self> {
         let (start, end) = normalized_range_bounds(&text, start, end);
         unsafe {
@@ -542,6 +566,7 @@ impl RawTextRange {
             start,
             end,
             enclosing_provider,
+            provider_generation,
         });
         NonNull::from(Box::leak(range))
     }
@@ -725,6 +750,7 @@ unsafe extern "system" fn text_range_clone(this: *mut c_void, range: *mut *mut c
         source.start,
         source.end,
         source.enclosing_provider,
+        source.provider_generation,
     );
     unsafe { *range = clone.as_ptr().cast() };
     S_OK
@@ -744,7 +770,11 @@ unsafe extern "system" fn text_range_compare(
     }
 
     let left = unsafe { &*(this as *const RawTextRange) };
-    let right = unsafe { &*(other as *const RawTextRange) };
+    unsafe { *equal = 0 };
+    let right = match unsafe { compatible_text_range(other, left.provider_generation) } {
+        Ok(right) => unsafe { right.as_ref() },
+        Err(error) => return error,
+    };
     unsafe {
         *equal =
             (left.start == right.start && left.end == right.end && left.text == right.text) as BOOL;
@@ -768,7 +798,10 @@ unsafe extern "system" fn text_range_compare_endpoints(
     }
 
     let source = unsafe { &*(this as *const RawTextRange) };
-    let target = unsafe { &*(target_range as *const RawTextRange) };
+    let target = match unsafe { compatible_text_range(target_range, source.provider_generation) } {
+        Ok(target) => unsafe { target.as_ref() },
+        Err(error) => return error,
+    };
     let source_offset = source.endpoint_offset(endpoint);
     let target_offset = target.endpoint_offset(target_endpoint);
     unsafe { *comparison = source_offset.cmp(&target_offset) as i32 };
@@ -970,9 +1003,13 @@ unsafe extern "system" fn text_range_move_endpoint_by_range(
         return E_INVALIDARG;
     }
 
-    let range = unsafe { &mut *(this as *mut RawTextRange) };
-    let target = unsafe { &*(target_range as *const RawTextRange) };
+    let provider_generation = unsafe { (*(this as *const RawTextRange)).provider_generation };
+    let target = match unsafe { compatible_text_range(target_range, provider_generation) } {
+        Ok(target) => unsafe { target.as_ref() },
+        Err(error) => return error,
+    };
     let target_offset = target.endpoint_offset(target_endpoint);
+    let range = unsafe { &mut *(this as *mut RawTextRange) };
 
     if endpoint == TextPatternRangeEndpoint_Start {
         range.set_start(target_offset);
@@ -1243,16 +1280,38 @@ fn guid_eq(left: &GUID, right: &GUID) -> bool {
         && left.data4 == right.data4
 }
 
+unsafe fn compatible_text_range(
+    range: *mut c_void,
+    provider_generation: u64,
+) -> Result<NonNull<RawTextRange>, HRESULT> {
+    let range = NonNull::new(range.cast::<RawTextRange>()).ok_or(E_INVALIDARG)?;
+
+    // SAFETY: COM requires a non-null interface argument to remain valid for this callback. Only
+    // the interface's first vtable word is read until local implementation identity is proven.
+    let vtable = unsafe { *(range.as_ptr() as *const *const RawTextRangeVtable) };
+    if !ptr::eq(vtable, ptr::addr_of!(RAW_TEXT_RANGE_VTABLE)) {
+        return Err(E_INVALIDARG);
+    }
+
+    if unsafe { range.as_ref().provider_generation } != provider_generation {
+        return Err(E_INVALIDARG);
+    }
+
+    Ok(range)
+}
+
 #[cfg(test)]
 mod tests {
     use std::ptr;
 
-    use windows_sys::Win32::Foundation::{SysFreeString, SysStringLen};
+    use windows_sys::Win32::Foundation::{S_OK, SysFreeString, SysStringLen};
     use windows_sys::Win32::System::Ole::{
         SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetVartype,
     };
     use windows_sys::Win32::System::Variant::VT_R8;
-    use windows_sys::Win32::UI::Accessibility::SupportedTextSelection_Multiple;
+    use windows_sys::Win32::UI::Accessibility::{
+        SupportedTextSelection_Multiple, TextPatternRangeEndpoint_Start,
+    };
     use windows_sys::core::BSTR;
 
     use super::{IID_ITEXT_PROVIDER2, RawTextProvider};
@@ -1288,7 +1347,7 @@ mod tests {
     #[test]
     fn text_range_clamps_non_boundary_offsets_before_slicing() {
         let text = "a\u{e9}z".to_owned();
-        let range = super::RawTextRange::allocate(text, 0, 2, ptr::null_mut());
+        let range = super::RawTextRange::allocate(text, 0, 2, ptr::null_mut(), 0);
 
         let selected = std::panic::catch_unwind(|| unsafe { (*range.as_ptr()).selected_text(-1) });
         unsafe {
@@ -1296,6 +1355,115 @@ mod tests {
         }
 
         assert_eq!(selected.expect("text range selection should not panic"), "a");
+    }
+
+    #[test]
+    fn foreign_text_range_is_rejected() {
+        let source = super::RawTextRange::allocate("same".to_owned(), 0, 1, ptr::null_mut(), 0);
+        let foreign = super::RawTextRange::allocate("same".to_owned(), 1, 2, ptr::null_mut(), 0);
+        let foreign_vtable = Box::leak(Box::new(unsafe {
+            // SAFETY: The vtable contains only function pointers and has no drop state. The copy
+            // provides a valid but distinct COM implementation identity for this regression test.
+            ptr::read(&super::RAW_TEXT_RANGE_VTABLE)
+        }));
+        unsafe {
+            (*foreign.as_ptr()).vtable = foreign_vtable;
+
+            let source_vtable = (*source.as_ptr()).vtable;
+            let mut equal = 1;
+            assert_eq!(
+                (source_vtable.compare)(
+                    source.as_ptr().cast(),
+                    foreign.as_ptr().cast(),
+                    &mut equal
+                ),
+                super::E_INVALIDARG,
+            );
+            assert_eq!(equal, 0);
+
+            let mut comparison = 123;
+            assert_eq!(
+                (source_vtable.compare_endpoints)(
+                    source.as_ptr().cast(),
+                    TextPatternRangeEndpoint_Start,
+                    foreign.as_ptr().cast(),
+                    TextPatternRangeEndpoint_Start,
+                    &mut comparison,
+                ),
+                super::E_INVALIDARG,
+            );
+
+            assert_eq!(
+                (source_vtable.move_endpoint_by_range)(
+                    source.as_ptr().cast(),
+                    TextPatternRangeEndpoint_Start,
+                    foreign.as_ptr().cast(),
+                    TextPatternRangeEndpoint_Start,
+                ),
+                super::E_INVALIDARG,
+            );
+            assert_eq!((*source.as_ptr()).start, 0);
+
+            super::text_range_release(foreign.as_ptr().cast());
+            super::text_range_release(source.as_ptr().cast());
+        }
+    }
+
+    #[test]
+    fn stale_text_range_is_rejected() {
+        let first_provider = RawTextProvider::allocate("same".to_owned());
+        let second_provider = RawTextProvider::allocate("same".to_owned());
+
+        unsafe {
+            let first_vtable = (*first_provider.as_ptr()).vtable;
+            let second_vtable = (*second_provider.as_ptr()).vtable;
+            let mut first_range = ptr::null_mut();
+            let mut second_range = ptr::null_mut();
+            assert_eq!(
+                (first_vtable.document_range)(first_provider.as_ptr().cast(), &mut first_range),
+                S_OK,
+            );
+            assert_eq!(
+                (second_vtable.document_range)(second_provider.as_ptr().cast(), &mut second_range),
+                S_OK,
+            );
+
+            let range_vtable = *(second_range as *mut &'static super::RawTextRangeVtable);
+            let mut equal = 1;
+            assert_eq!(
+                (range_vtable.compare)(second_range, first_range, &mut equal),
+                super::E_INVALIDARG,
+            );
+            assert_eq!(equal, 0);
+
+            let mut comparison = 123;
+            assert_eq!(
+                (range_vtable.compare_endpoints)(
+                    second_range,
+                    TextPatternRangeEndpoint_Start,
+                    first_range,
+                    TextPatternRangeEndpoint_Start,
+                    &mut comparison,
+                ),
+                super::E_INVALIDARG,
+            );
+
+            assert_eq!(
+                (range_vtable.move_endpoint_by_range)(
+                    second_range,
+                    TextPatternRangeEndpoint_Start,
+                    first_range,
+                    TextPatternRangeEndpoint_Start,
+                ),
+                super::E_INVALIDARG,
+            );
+            assert_eq!((*(second_range as *const super::RawTextRange)).start, 0);
+
+            super::text_range_release(first_range);
+            super::text_range_release(second_range);
+            (first_vtable.release)(first_provider.as_ptr().cast());
+            (second_vtable.release)(second_provider.as_ptr().cast());
+        }
     }
 
     #[test]
