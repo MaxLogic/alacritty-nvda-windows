@@ -7,6 +7,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use alacritty_terminal::index::Point;
+use unicode_segmentation::UnicodeSegmentation;
 use windows_sys::Win32::Foundation::{BOOL, E_FAIL, HWND, S_OK, SysAllocStringLen};
 use windows_sys::Win32::System::Com::SAFEARRAY;
 use windows_sys::Win32::System::Ole::{
@@ -802,7 +803,7 @@ unsafe fn text_range_expand_to_enclosing_unit(this: *mut c_void, unit: TextUnit)
     let range = unsafe { &mut *(this as *mut RawTextRange) };
     trace_uia(&format!("text_range.ExpandToEnclosingUnit {unit}"));
     if unit == TextUnit_Character {
-        let start = previous_char_boundary(&range.text, range.start);
+        let start = previous_character_boundary(&range.text, range.start);
         range.set_range(start, next_char_boundary(&range.text, start));
     } else if unit == TextUnit_Word {
         let (start, end) = if range.start == range.end {
@@ -925,10 +926,18 @@ unsafe fn text_range_move(
     }
 
     let range = unsafe { &mut *(this as *mut RawTextRange) };
+    let degenerate = range.start == range.end;
     let width = range.end.saturating_sub(range.start);
     let start = normalized_unit_start(&range.text, range.start, unit);
-    let (new_start, actual) = move_offset_by_unit(&range.text, start, unit, count);
-    if unit == TextUnit_Word {
+    let (mut new_start, mut actual) = move_offset_by_unit(&range.text, start, unit, count);
+    if unit == TextUnit_Character && !degenerate && new_start == range.text.len() && new_start > 0 {
+        let (clipped_start, adjustment) = move_offset_by_unit(&range.text, new_start, unit, -1);
+        new_start = clipped_start;
+        actual += adjustment;
+    }
+    if unit == TextUnit_Character && !degenerate {
+        range.set_range(new_start, next_char_boundary(&range.text, new_start));
+    } else if unit == TextUnit_Word {
         let (_, end) = word_bounds(&range.text, new_start);
         range.set_range(new_start, end);
     } else if is_terminal_line_unit(unit) {
@@ -1279,7 +1288,9 @@ fn move_offset_by_unit(text: &str, offset: usize, unit: TextUnit, count: i32) ->
 }
 
 fn normalized_unit_start(text: &str, offset: usize, unit: TextUnit) -> usize {
-    if unit == TextUnit_Word {
+    if unit == TextUnit_Character {
+        previous_character_boundary(text, offset)
+    } else if unit == TextUnit_Word {
         word_bounds(text, offset).0
     } else if is_terminal_line_unit(unit) {
         line_bounds(text, offset).0
@@ -1308,7 +1319,11 @@ fn move_offset_by_boundaries(
 }
 
 fn char_boundaries(text: &str) -> Vec<usize> {
-    text.char_indices().map(|(index, _)| index).chain([text.len()]).collect()
+    text.grapheme_indices(true).map(|(index, _)| index).chain([text.len()]).collect()
+}
+
+fn previous_character_boundary(text: &str, offset: usize) -> usize {
+    char_boundaries(text).into_iter().take_while(|index| *index <= offset).last().unwrap_or(0)
 }
 
 fn line_starts(text: &str) -> Vec<usize> {
@@ -1419,14 +1434,10 @@ fn previous_char_boundary(text: &str, mut offset: usize) -> usize {
 }
 
 fn next_char_boundary(text: &str, offset: usize) -> usize {
-    let mut offset = offset.min(text.len());
-    if offset < text.len() {
-        offset += 1;
-    }
-    while !text.is_char_boundary(offset) {
-        offset += 1;
-    }
-    offset
+    text.grapheme_indices(true)
+        .map(|(index, _)| index)
+        .find(|index| *index > offset)
+        .unwrap_or(text.len())
 }
 
 fn clamp_to_boundary(text: &str, offset: usize) -> usize {

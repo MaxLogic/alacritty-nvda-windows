@@ -113,6 +113,112 @@ mod tests {
     }
 
     #[test]
+    fn unicode_character_move_preserves_boundaries() {
+        unsafe {
+            let (provider, range) = document_range("aé€😀e\u{301}界z");
+            let provider_vtable =
+                (*(provider as *mut crate::accessibility::text_pattern::RawTextProvider)).vtable;
+            let range_vtable =
+                *(range as *mut &'static crate::accessibility::text_pattern::RawTextRangeVtable);
+            let mut moved = 0;
+
+            assert_eq!(
+                (range_vtable.move_endpoint_by_unit)(
+                    range,
+                    TextPatternRangeEndpoint_End,
+                    TextUnit_Character,
+                    -6,
+                    &mut moved,
+                ),
+                0,
+            );
+            assert_eq!(range_text(range), "a");
+
+            for expected in ["é", "€", "😀", "e\u{301}", "界", "z"] {
+                assert_eq!((range_vtable.move_range)(range, TextUnit_Character, 1, &mut moved), 0,);
+                assert_eq!(moved, 1);
+                assert_eq!(range_text(range), expected);
+            }
+
+            release_range(range);
+            (provider_vtable.release)(provider);
+        }
+    }
+
+    #[test]
+    fn unicode_character_move_handles_original_5172_boundary() {
+        unsafe {
+            let text = format!("{}éz", "a".repeat(5171));
+            let (provider, range) = document_range(&text);
+            let provider_vtable =
+                (*(provider as *mut crate::accessibility::text_pattern::RawTextProvider)).vtable;
+            let range_vtable =
+                *(range as *mut &'static crate::accessibility::text_pattern::RawTextRangeVtable);
+            let mut moved = 0;
+
+            assert_eq!(
+                (range_vtable.move_endpoint_by_unit)(
+                    range,
+                    TextPatternRangeEndpoint_Start,
+                    TextUnit_Character,
+                    5170,
+                    &mut moved,
+                ),
+                0,
+            );
+            assert_eq!(
+                (range_vtable.move_endpoint_by_unit)(
+                    range,
+                    TextPatternRangeEndpoint_End,
+                    TextUnit_Character,
+                    -2,
+                    &mut moved,
+                ),
+                0,
+            );
+            assert_eq!(range_text(range), "a");
+
+            assert_eq!((range_vtable.move_range)(range, TextUnit_Character, 1, &mut moved), 0,);
+            assert_eq!(moved, 1);
+            assert_eq!(range_text(range), "é");
+
+            release_range(range);
+            (provider_vtable.release)(provider);
+        }
+    }
+
+    #[test]
+    fn character_move_clips_at_document_end() {
+        unsafe {
+            let (provider, range) = document_range("az");
+            let provider_vtable =
+                (*(provider as *mut crate::accessibility::text_pattern::RawTextProvider)).vtable;
+            let range_vtable =
+                *(range as *mut &'static crate::accessibility::text_pattern::RawTextRangeVtable);
+            let mut moved = 0;
+
+            assert_eq!(
+                (range_vtable.move_endpoint_by_unit)(
+                    range,
+                    TextPatternRangeEndpoint_Start,
+                    TextUnit_Character,
+                    1,
+                    &mut moved,
+                ),
+                0,
+            );
+            assert_eq!(range_text(range), "z");
+
+            assert_eq!((range_vtable.move_range)(range, TextUnit_Character, 1, &mut moved), 0,);
+            assert_eq!(moved, 0);
+            assert_eq!(range_text(range), "z");
+
+            release_range(range);
+            (provider_vtable.release)(provider);
+        }
+    }
+
+    #[test]
     fn moving_start_endpoint_past_end_collapses_range_at_new_offset() {
         unsafe {
             let (provider, range) = document_range("abcdef");
