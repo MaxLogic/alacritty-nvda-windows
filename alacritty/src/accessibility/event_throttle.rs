@@ -50,7 +50,7 @@ mod tests {
             notifications: Vec::new(),
         };
 
-        throttle.record_snapshot_change(true, true, true, Some("output".to_owned()));
+        throttle.record_snapshot_change(true, true, true, Some("output".to_owned()), true);
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(100), &mut sink);
 
         assert!(sink.events.is_empty());
@@ -69,7 +69,7 @@ mod tests {
             notifications: Vec::new(),
         };
 
-        throttle.record_snapshot_change(true, true, true, Some("first".to_owned()));
+        throttle.record_snapshot_change(true, true, true, Some("first".to_owned()), true);
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(30), &mut sink);
         assert_eq!(sink.events, [
             UIA_Text_TextChangedEventId,
@@ -79,8 +79,8 @@ mod tests {
         assert_eq!(sink.active_text_position_events, 1);
         assert_eq!(sink.notifications, ["first"]);
 
-        throttle.record_snapshot_change(true, true, true, Some("second".to_owned()));
-        throttle.record_snapshot_change(true, true, true, Some("third".to_owned()));
+        throttle.record_snapshot_change(true, true, true, Some("second".to_owned()), true);
+        throttle.record_snapshot_change(true, true, true, Some("third".to_owned()), true);
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(60), &mut sink);
         assert_eq!(sink.events, [
             UIA_Text_TextChangedEventId,
@@ -114,9 +114,9 @@ mod tests {
             notifications: Vec::new(),
         };
 
-        throttle.record_snapshot_change(true, false, false, None);
+        throttle.record_snapshot_change(true, false, false, None, true);
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(75), &mut sink);
-        throttle.record_snapshot_change(false, true, true, None);
+        throttle.record_snapshot_change(false, true, true, None, true);
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(150), &mut sink);
 
         assert_eq!(sink.events, [
@@ -137,9 +137,9 @@ mod tests {
             notifications: Vec::new(),
         };
 
-        throttle.record_snapshot_change(true, true, true, None);
+        throttle.record_snapshot_change(true, true, true, None, true);
         throttle.flush_due(std::ptr::null_mut(), start, &mut sink);
-        throttle.record_snapshot_change(false, true, true, None);
+        throttle.record_snapshot_change(false, true, true, None, true);
         throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(10), &mut sink);
 
         assert_eq!(sink.active_text_position_events, 2);
@@ -156,11 +156,51 @@ mod tests {
             notifications: Vec::new(),
         };
 
-        throttle.record_snapshot_change(false, false, true, None);
+        throttle.record_snapshot_change(false, false, true, None, true);
         throttle.flush_due(std::ptr::null_mut(), start, &mut sink);
 
         assert!(sink.events.is_empty());
         assert!(!sink.events.contains(&UIA_ActiveTextPositionChangedEventId));
         assert_eq!(sink.active_text_position_events, 1);
+    }
+
+    #[test]
+    fn focus_controls_speech_not_structure() {
+        let start = Instant::now();
+        let mut throttle = UiaEventThrottle::new(Duration::from_millis(75), start);
+        let mut sink = RecordingSink {
+            listening: true,
+            events: Vec::new(),
+            active_text_position_events: 0,
+            notifications: Vec::new(),
+        };
+
+        throttle.record_snapshot_change(true, true, true, Some("focused".to_owned()), true);
+        throttle.flush_due(std::ptr::null_mut(), start, &mut sink);
+        assert_eq!(sink.notifications, ["focused"]);
+
+        throttle.record_snapshot_change(
+            false,
+            false,
+            false,
+            Some("queued while focused".to_owned()),
+            true,
+        );
+
+        sink.events.clear();
+        sink.active_text_position_events = 0;
+        sink.notifications.clear();
+        throttle.record_snapshot_change(true, true, true, Some("background".to_owned()), false);
+        throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(100), &mut sink);
+        assert_eq!(sink.events, [
+            UIA_Text_TextChangedEventId,
+            UIA_Text_TextSelectionChangedEventId,
+        ]);
+        assert_eq!(sink.active_text_position_events, 1);
+        assert!(sink.notifications.is_empty());
+
+        throttle.record_snapshot_change(false, false, false, None, true);
+        throttle.flush_due(std::ptr::null_mut(), start + Duration::from_millis(200), &mut sink);
+        assert!(sink.notifications.is_empty());
     }
 }

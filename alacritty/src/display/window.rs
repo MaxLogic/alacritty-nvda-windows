@@ -215,7 +215,9 @@ impl Window {
         let accessibility = hwnd_from_raw_window_handle(raw_window_handle)
             // SAFETY: The HWND belongs to the `WinitWindow` stored in this `Window`, and the
             // `_accessibility` field is declared before `window` so it is dropped first.
-            .and_then(|hwnd| unsafe { WindowsAccessibility::new(hwnd, identity.title.clone()) });
+            .and_then(|hwnd| unsafe {
+                WindowsAccessibility::new(hwnd, identity.title.clone(), window.has_focus())
+            });
 
         Ok(Self {
             hold: options.terminal_options.hold,
@@ -270,6 +272,13 @@ impl Window {
     pub fn update_accessibility_snapshot<T: EventListener>(&self, term: &Term<T>, size: &SizeInfo) {
         if let Some(accessibility) = &self._accessibility {
             accessibility.update_snapshot(term, size);
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn set_accessibility_focused(&self, focused: bool) {
+        if let Some(accessibility) = &self._accessibility {
+            accessibility.set_focused(focused);
         }
     }
 

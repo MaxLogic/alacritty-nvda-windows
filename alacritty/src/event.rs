@@ -1985,6 +1985,9 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     WindowEvent::Focused(is_focused) => {
                         self.ctx.terminal.is_focused = is_focused;
 
+                        #[cfg(windows)]
+                        self.ctx.window().set_accessibility_focused(is_focused);
+
                         // When the unfocused hollow is used we must redraw on focus change.
                         if self.ctx.config.cursor.unfocused_hollow {
                             *self.ctx.dirty = true;

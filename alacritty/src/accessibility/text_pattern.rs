@@ -65,11 +65,19 @@ struct TextProviderState {
     layout: Option<TextProviderLayout>,
     selection: Vec<(usize, usize)>,
     cursor: Option<Point<usize>>,
+    focused: bool,
 }
 
 impl TextProviderState {
     fn from_text(text: String) -> Self {
-        Self { text, terminal: None, layout: None, selection: Vec::new(), cursor: None }
+        Self {
+            text,
+            terminal: None,
+            layout: None,
+            selection: Vec::new(),
+            cursor: None,
+            focused: false,
+        }
     }
 
     fn from_terminal(
@@ -77,6 +85,7 @@ impl TextProviderState {
         layout: Option<TextProviderLayout>,
         selection: Vec<(usize, usize)>,
         cursor: Point<usize>,
+        focused: bool,
     ) -> Self {
         Self {
             text: snapshot.text().to_owned(),
@@ -84,6 +93,7 @@ impl TextProviderState {
             layout,
             selection,
             cursor: Some(cursor),
+            focused,
         }
     }
 
@@ -175,9 +185,14 @@ impl RawTextProvider {
         layout: Option<TextProviderLayout>,
         selection: Vec<(usize, usize)>,
         cursor: Point<usize>,
+        focused: bool,
     ) {
         *self.state.write().expect("text provider lock poisoned") =
-            TextProviderState::from_terminal(snapshot, layout, selection, cursor);
+            TextProviderState::from_terminal(snapshot, layout, selection, cursor, focused);
+    }
+
+    pub(crate) fn set_focused(&self, focused: bool) {
+        self.state.write().expect("text provider lock poisoned").focused = focused;
     }
 
     #[cfg(test)]
@@ -204,6 +219,7 @@ impl RawTextProvider {
             )),
             Vec::new(),
             alacritty_terminal::index::Point::new(0, alacritty_terminal::index::Column(0)),
+            true,
         );
     }
 
@@ -523,7 +539,7 @@ unsafe fn text_provider_get_caret_range(
 
     let provider = unsafe { &*(this as *const RawTextProvider) };
     unsafe {
-        *is_active = 1;
+        *is_active = provider.state.read().expect("text provider lock poisoned").focused as BOOL;
         *range = provider.caret_range();
     }
     S_OK
@@ -1715,6 +1731,7 @@ mod tests {
         let vtable = unsafe { (*provider.as_ptr()).vtable };
 
         unsafe {
+            (*provider.as_ptr()).set_focused(true);
             let mut is_active = 0;
             let mut range = std::ptr::null_mut();
             assert_eq!((vtable.get_caret_range)(raw_provider, &mut is_active, &mut range), 0);
@@ -1727,6 +1744,37 @@ mod tests {
             assert_eq!(SysStringLen(text), 0);
 
             SysFreeString(text);
+            (range_vtable.release)(range);
+            (vtable.release)(raw_provider);
+        }
+    }
+
+    #[test]
+    fn text_provider2_get_caret_range_reflects_focus() {
+        let provider = RawTextProvider::allocate("alpha beta".to_owned());
+        let raw_provider = provider.as_ptr().cast();
+        let vtable = unsafe { (*provider.as_ptr()).vtable };
+
+        unsafe {
+            let mut is_active = 1;
+            let mut range = std::ptr::null_mut();
+            assert_eq!((vtable.get_caret_range)(raw_provider, &mut is_active, &mut range), 0);
+            assert_eq!(is_active, 0);
+            assert!(!range.is_null());
+
+            let range_vtable = *(range as *mut &'static super::RawTextRangeVtable);
+            (range_vtable.release)(range);
+
+            (*provider.as_ptr()).set_focused(true);
+            assert_eq!((vtable.get_caret_range)(raw_provider, &mut is_active, &mut range), 0);
+            assert_eq!(is_active, 1);
+            let range_vtable = *(range as *mut &'static super::RawTextRangeVtable);
+            (range_vtable.release)(range);
+
+            (*provider.as_ptr()).set_focused(false);
+            assert_eq!((vtable.get_caret_range)(raw_provider, &mut is_active, &mut range), 0);
+            assert_eq!(is_active, 0);
+            let range_vtable = *(range as *mut &'static super::RawTextRangeVtable);
             (range_vtable.release)(range);
             (vtable.release)(raw_provider);
         }

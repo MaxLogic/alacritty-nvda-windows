@@ -180,11 +180,16 @@ impl UiaEventThrottle {
         selection_changed: bool,
         active_text_position_changed: bool,
         notification: Option<String>,
+        focused: bool,
     ) {
         self.pending_text |= text_changed;
         self.pending_selection |= selection_changed;
         self.pending_active_text_position |= active_text_position_changed;
-        self.record_notification(notification);
+        if focused {
+            self.record_notification(notification);
+        } else {
+            self.pending_notification = None;
+        }
     }
 
     pub(crate) fn flush_due<S: UiaEventSink>(
@@ -339,10 +344,13 @@ impl WindowsAccessibility {
     ///
     /// `hwnd` must be a valid Alacritty window handle owned by the current UI thread, and the
     /// returned attachment must be dropped before the window is destroyed.
-    pub unsafe fn new(hwnd: HWND, name: impl Into<String>) -> Option<Self> {
+    pub unsafe fn new(hwnd: HWND, name: impl Into<String>, focused: bool) -> Option<Self> {
         let name = name.into();
         trace_uia(&format!("accessibility.new hwnd={hwnd:p} name={name:?}"));
         let provider = RawProvider::allocate(hwnd, TerminalProvider::new(name));
+        unsafe {
+            (*provider.as_ptr()).set_focused(focused);
+        }
         let ref_data = provider.as_ptr() as usize;
         let installed = unsafe {
             SetWindowSubclass(hwnd, Some(accessibility_subclass_proc_ffi), SUBCLASS_ID, ref_data)
@@ -397,14 +405,23 @@ impl WindowsAccessibility {
             );
         unsafe {
             let provider = &*self.provider.as_ptr();
-            provider.set_terminal_state(snapshot, layout, selection, cursor);
+            provider.set_terminal_state(snapshot, layout, selection, cursor, term.is_focused);
         }
         self.record_and_flush_events(
             text_changed,
             selection_changed,
             active_text_position_changed,
             notification,
+            term.is_focused,
         );
+    }
+
+    pub fn set_focused(&self, focused: bool) {
+        trace_uia(&format!("accessibility.focus focused={focused}"));
+        unsafe {
+            (*self.provider.as_ptr()).set_focused(focused);
+        }
+        self.record_and_flush_events(false, false, true, None, focused);
     }
 
     fn snapshot_changes(
@@ -461,6 +478,7 @@ impl WindowsAccessibility {
         selection_changed: bool,
         active_text_position_changed: bool,
         notification: Option<String>,
+        focused: bool,
     ) {
         let mut throttle = self.event_throttle.lock().expect("event throttle lock poisoned");
         throttle.record_snapshot_change(
@@ -468,6 +486,7 @@ impl WindowsAccessibility {
             selection_changed,
             active_text_position_changed,
             notification,
+            focused,
         );
         let mut sink = NativeUiaEventSink { provider: self.provider };
         throttle.flush_due(self.raw_provider(), Instant::now(), &mut sink);
@@ -757,9 +776,17 @@ impl RawProvider {
         layout: Option<TextProviderLayout>,
         selection: Vec<(usize, usize)>,
         cursor: Point<usize>,
+        focused: bool,
     ) {
         unsafe {
-            (*self.text_provider.as_ptr()).set_terminal_state(snapshot, layout, selection, cursor);
+            (*self.text_provider.as_ptr())
+                .set_terminal_state(snapshot, layout, selection, cursor, focused);
+        }
+    }
+
+    fn set_focused(&self, focused: bool) {
+        unsafe {
+            (*self.text_provider.as_ptr()).set_focused(focused);
         }
     }
 
@@ -1424,7 +1451,7 @@ mod tests {
     }
 
     #[test]
-    fn accessibility_cursor_preserves_previous_caret_for_status_footer() {
+    fn footer_caret_is_suppressed() {
         let previous = Point::new(19, Column(13));
         let footer_cursor = Point::new(22, Column(102));
         let footer = "  terminal medium \u{00b7} C:\\work\\alacritty \u{00b7} Context 100% left \

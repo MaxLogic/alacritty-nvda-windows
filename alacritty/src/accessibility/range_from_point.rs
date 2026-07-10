@@ -140,6 +140,7 @@ mod tests {
                 None,
                 Vec::new(),
                 alacritty_terminal::index::Point::new(0, alacritty_terminal::index::Column(0)),
+                true,
             );
 
             let mut range = std::ptr::null_mut();
