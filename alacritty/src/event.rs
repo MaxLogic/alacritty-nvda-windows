@@ -256,6 +256,10 @@ impl ApplicationHandler<Event> for Processor {
             info!(target: LOG_TARGET_WINIT, "{event:?}");
         }
 
+        if matches!(event, WindowEvent::RedrawRequested) {
+            alacritty_terminal::diagnostics::record_current("redraw_delivery");
+        }
+
         // Ignore all events we do not care about.
         if Self::skip_window_event(&event) {
             return;
@@ -285,6 +289,16 @@ impl ApplicationHandler<Event> for Processor {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         if self.config.debug.print_events {
             info!(target: LOG_TARGET_WINIT, "{event:?}");
+        }
+
+        match &event.payload {
+            EventType::Terminal(TerminalEvent::Title(title)) => {
+                alacritty_terminal::diagnostics::record_title("winit_receipt", title);
+            },
+            EventType::Terminal(TerminalEvent::Wakeup) => {
+                alacritty_terminal::diagnostics::record_current("terminal_wakeup");
+            },
+            _ => (),
         }
 
         // Handle events which don't mandate the WindowId.
@@ -410,6 +424,7 @@ impl ApplicationHandler<Event> for Processor {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     window_context.dirty = true;
                     if window_context.display.window.has_frame {
+                        alacritty_terminal::diagnostics::record_current("redraw_request");
                         window_context.display.window.request_redraw();
                     }
                 }
@@ -444,6 +459,7 @@ impl ApplicationHandler<Event> for Processor {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     window_context.display.window.has_frame = true;
                     if window_context.dirty {
+                        alacritty_terminal::diagnostics::record_current("redraw_request");
                         window_context.display.window.request_redraw();
                     }
                 }
@@ -1867,6 +1883,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 EventType::Terminal(event) => match event {
                     TerminalEvent::Title(title) => {
                         if !self.ctx.preserve_title && self.ctx.config.window.dynamic_title {
+                            alacritty_terminal::diagnostics::record_title("title_apply", &title);
                             self.ctx.window().set_title(title);
                         }
                     },
@@ -2088,6 +2105,15 @@ impl EventProxy {
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: TerminalEvent) {
+        match &event {
+            TerminalEvent::Title(title) => {
+                alacritty_terminal::diagnostics::record_title("enqueue", title);
+            },
+            TerminalEvent::Wakeup => {
+                alacritty_terminal::diagnostics::record_current("enqueue_wakeup");
+            },
+            _ => (),
+        }
         let _ = self.proxy.send_event(Event::new(event.into(), self.window_id));
     }
 }

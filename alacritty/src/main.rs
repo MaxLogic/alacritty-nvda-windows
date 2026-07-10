@@ -209,6 +209,7 @@ fn alacritty(mut options: Options) -> Result<(), Box<dyn Error>> {
 
     // Start event loop and block until shutdown.
     let result = processor.run(window_event_loop);
+    alacritty_terminal::diagnostics::dump();
 
     // `Processor` must be dropped before calling `FreeConsole`.
     //

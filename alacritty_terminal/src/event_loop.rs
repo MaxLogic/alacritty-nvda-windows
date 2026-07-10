@@ -151,6 +151,7 @@ where
             }
 
             // Parse the incoming bytes.
+            crate::diagnostics::record_bytes("pty_read", &buf[..unprocessed]);
             state.parser.advance(&mut **terminal, &buf[..unprocessed]);
 
             processed += unprocessed;

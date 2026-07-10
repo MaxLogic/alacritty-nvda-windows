@@ -2221,6 +2221,10 @@ impl<T: EventListener> Handler for Term<T> {
     fn set_title(&mut self, title: Option<String>) {
         trace!("Setting title to '{title:?}'");
 
+        if let Some(title) = title.as_deref() {
+            crate::diagnostics::record_title("parser_title", title);
+        }
+
         self.title.clone_from(&title);
 
         let title_event = match title {

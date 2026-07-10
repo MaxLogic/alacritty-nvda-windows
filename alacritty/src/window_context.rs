@@ -395,6 +395,7 @@ impl WindowContext {
             &self.config,
             &mut self.search_state,
         );
+        alacritty_terminal::diagnostics::record_current("frame_complete");
     }
 
     /// Process events for this terminal window.
