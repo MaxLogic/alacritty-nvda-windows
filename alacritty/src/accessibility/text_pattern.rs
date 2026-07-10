@@ -13,9 +13,7 @@ use windows_sys::Win32::System::Com::SAFEARRAY;
 use windows_sys::Win32::System::Ole::{
     SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement, SafeArraySetIID,
 };
-use windows_sys::Win32::System::Variant::{
-    VARENUM, VARIANT, VT_EMPTY, VT_R8, VT_UNKNOWN, VariantInit,
-};
+use windows_sys::Win32::System::Variant::{VARIANT, VT_EMPTY, VT_R8, VT_UNKNOWN, VariantInit};
 use windows_sys::Win32::UI::Accessibility::{
     SupportedTextSelection, SupportedTextSelection_Multiple, TextPatternRangeEndpoint,
     TextPatternRangeEndpoint_Start, TextUnit, TextUnit_Character, TextUnit_Document, TextUnit_Line,
@@ -155,6 +153,25 @@ impl TextProviderLayout {
 
         Some((row, column))
     }
+
+    fn rectangle(self, row: usize, start_column: usize, end_column: usize) -> Option<[f64; 4]> {
+        let start_column = start_column.min(self.columns);
+        let end_column = end_column.min(self.columns);
+        if row >= self.rows
+            || start_column >= end_column
+            || self.cell_width <= 0.0
+            || self.cell_height <= 0.0
+        {
+            return None;
+        }
+
+        Some([
+            self.origin_x + start_column as f64 * self.cell_width,
+            self.origin_y + row as f64 * self.cell_height,
+            (end_column - start_column) as f64 * self.cell_width,
+            self.cell_height,
+        ])
+    }
 }
 
 impl RawTextProvider {
@@ -279,7 +296,8 @@ impl RawTextProvider {
         let state = self.state.read().expect("text provider lock poisoned");
         let offset = state.cursor_offset();
         trace_uia(&format!("text_provider.GetCaretRange offset={offset}"));
-        RawTextRange::allocate(
+        RawTextRange::allocate_for_provider(
+            self,
             state.text.clone(),
             offset,
             offset,
@@ -288,6 +306,60 @@ impl RawTextProvider {
         )
         .as_ptr()
         .cast()
+    }
+
+    pub(crate) fn bounding_rectangles(
+        &self,
+        expected_text: &str,
+        start: usize,
+        end: usize,
+    ) -> Vec<f64> {
+        let state = self.state.read().expect("text provider lock poisoned");
+        let (Some(snapshot), Some(layout)) = (&state.terminal, state.layout) else {
+            trace_uia("text_range.GetBoundingRectangles empty=no-layout");
+            return Vec::new();
+        };
+        if state.text != expected_text {
+            trace_uia(&format!(
+                "text_range.GetBoundingRectangles empty=stale range_len={} state_len={}",
+                expected_text.len(),
+                state.text.len()
+            ));
+            return Vec::new();
+        }
+        if start >= end {
+            trace_uia("text_range.GetBoundingRectangles empty=degenerate");
+            return Vec::new();
+        }
+
+        let mut rectangles = Vec::new();
+        for row in 0..snapshot.screen_lines().min(layout.rows) {
+            let row_start = snapshot
+                .offset_for_point(Point::new(row, alacritty_terminal::index::Column(0)))
+                .unwrap_or(expected_text.len());
+            let row_end = snapshot
+                .offset_for_point(Point::new(
+                    row,
+                    alacritty_terminal::index::Column(snapshot.columns()),
+                ))
+                .unwrap_or(row_start);
+            let clipped_start = start.max(row_start).min(row_end);
+            let clipped_end = end.max(row_start).min(row_end);
+            if clipped_start >= clipped_end {
+                continue;
+            }
+
+            let Some((start_column, end_column)) =
+                snapshot.range_columns(row, clipped_start, clipped_end)
+            else {
+                continue;
+            };
+            if let Some(rectangle) = layout.rectangle(row, start_column, end_column) {
+                rectangles.extend(rectangle);
+            }
+        }
+
+        rectangles
     }
 }
 
@@ -394,7 +466,8 @@ unsafe fn text_provider_get_selection(this: *mut c_void, ranges: *mut *mut SAFEA
     let _ = unsafe { SafeArraySetIID(array, &IID_IUNKNOWN) };
 
     for (index, (start, end)) in selection.into_iter().enumerate() {
-        let range = RawTextRange::allocate(
+        let range = RawTextRange::allocate_for_provider(
+            provider,
             text.clone(),
             clamp_to_boundary(&text, start),
             clamp_to_boundary(&text, end),
@@ -434,8 +507,14 @@ unsafe fn text_provider_get_visible_ranges(
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let text = provider.text();
     let end = text.len();
-    let range =
-        RawTextRange::allocate(text, 0, end, provider.enclosing_provider(), provider.generation);
+    let range = RawTextRange::allocate_for_provider(
+        provider,
+        text,
+        0,
+        end,
+        provider.enclosing_provider(),
+        provider.generation,
+    );
     // SAFETY: `single_unknown_safearray` stores the AddRef'd COM range in a VT_UNKNOWN SAFEARRAY;
     // the local reference is released immediately after the array takes its reference.
     let array = unsafe { single_unknown_safearray(range.as_ptr().cast()) };
@@ -472,7 +551,8 @@ unsafe fn text_provider_range_from_point(
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let (text, offset) = provider.range_from_point(point);
     trace_uia(&format!("text_provider.RangeFromPoint offset={offset}"));
-    let text_range = RawTextRange::allocate(
+    let text_range = RawTextRange::allocate_for_provider(
+        provider,
         text,
         offset,
         offset,
@@ -491,7 +571,8 @@ unsafe fn text_provider_document_range(this: *mut c_void, range: *mut *mut c_voi
     let provider = unsafe { &*(this as *const RawTextProvider) };
     let text = provider.text();
     trace_uia(&format!("text_provider.DocumentRange len={}", text.len()));
-    let text_range = RawTextRange::allocate(
+    let text_range = RawTextRange::allocate_for_provider(
+        provider,
         text.clone(),
         0,
         text.len(),
@@ -552,12 +633,50 @@ pub(crate) struct RawTextRange {
     text: String,
     start: usize,
     end: usize,
+    text_provider: *mut RawTextProvider,
     enclosing_provider: *mut c_void,
     provider_generation: u64,
 }
 
 impl RawTextRange {
+    #[cfg(test)]
     fn allocate(
+        text: String,
+        start: usize,
+        end: usize,
+        enclosing_provider: *mut c_void,
+        provider_generation: u64,
+    ) -> NonNull<Self> {
+        Self::allocate_with_provider(
+            ptr::null_mut(),
+            text,
+            start,
+            end,
+            enclosing_provider,
+            provider_generation,
+        )
+    }
+
+    fn allocate_for_provider(
+        provider: &RawTextProvider,
+        text: String,
+        start: usize,
+        end: usize,
+        enclosing_provider: *mut c_void,
+        provider_generation: u64,
+    ) -> NonNull<Self> {
+        Self::allocate_with_provider(
+            provider as *const RawTextProvider as *mut RawTextProvider,
+            text,
+            start,
+            end,
+            enclosing_provider,
+            provider_generation,
+        )
+    }
+
+    fn allocate_with_provider(
+        text_provider: *mut RawTextProvider,
         text: String,
         start: usize,
         end: usize,
@@ -567,8 +686,13 @@ impl RawTextRange {
         let (start, end) = normalized_range_bounds(&text, start, end);
         unsafe {
             // SAFETY: Each text range keeps the enclosing provider alive while clients can ask
-            // for its enclosing element.
+            // for its enclosing element. Production ranges also retain the originating text
+            // provider directly, so callbacks and clones can read its current layout until this
+            // range's final `Release` balances both references in `Drop`.
             add_ref_raw_provider(enclosing_provider);
+            if !text_provider.is_null() {
+                text_provider_add_ref(text_provider.cast());
+            }
         }
         let range = Box::new(Self {
             vtable: &RAW_TEXT_RANGE_VTABLE,
@@ -576,6 +700,7 @@ impl RawTextRange {
             text,
             start,
             end,
+            text_provider,
             enclosing_provider,
             provider_generation,
         });
@@ -618,8 +743,11 @@ impl RawTextRange {
 impl Drop for RawTextRange {
     fn drop(&mut self) {
         unsafe {
-            // SAFETY: This balances the AddRef in `RawTextRange::allocate`.
+            // SAFETY: These balance the provider references retained by range allocation.
             release_raw_provider(self.enclosing_provider);
+            if !self.text_provider.is_null() {
+                text_provider_release(self.text_provider.cast());
+            }
         }
     }
 }
@@ -756,7 +884,8 @@ unsafe fn text_range_clone(this: *mut c_void, range: *mut *mut c_void) -> HRESUL
     }
 
     let source = unsafe { &*(this as *const RawTextRange) };
-    let clone = RawTextRange::allocate(
+    let clone = RawTextRange::allocate_with_provider(
+        source.text_provider,
         source.text.clone(),
         source.start,
         source.end,
@@ -885,15 +1014,27 @@ unsafe fn text_range_get_attribute_value(
 }
 
 unsafe fn text_range_get_bounding_rectangles(
-    _this: *mut c_void,
+    this: *mut c_void,
     rectangles: *mut *mut SAFEARRAY,
 ) -> HRESULT {
     if rectangles.is_null() {
         return E_POINTER;
     }
 
-    unsafe { *rectangles = empty_array(VT_R8) };
-    trace_uia("text_range.GetBoundingRectangles VT_R8 empty");
+    unsafe { *rectangles = ptr::null_mut() };
+    let range = unsafe { &*(this as *const RawTextRange) };
+    // SAFETY: Range allocation AddRefs every non-null text-provider pointer, clones repeat that
+    // retention, and `RawTextRange::Drop` releases it only after this range's final COM callback.
+    let values = unsafe { range.text_provider.as_ref() }
+        .map(|provider| provider.bounding_rectangles(&range.text, range.start, range.end))
+        .unwrap_or_default();
+    let array = unsafe { double_safearray(&values) };
+    if array.is_null() {
+        return E_FAIL;
+    }
+
+    unsafe { *rectangles = array };
+    trace_uia(&format!("text_range.GetBoundingRectangles rectangles={}", values.len() / 4));
     S_OK
 }
 
@@ -1279,8 +1420,25 @@ fn empty_unknown_safearray() -> *mut SAFEARRAY {
     }
 }
 
-fn empty_array(vartype: VARENUM) -> *mut SAFEARRAY {
-    unsafe { SafeArrayCreateVector(vartype, 0, 0) }
+unsafe fn double_safearray(values: &[f64]) -> *mut SAFEARRAY {
+    let array = unsafe { SafeArrayCreateVector(VT_R8, 0, values.len() as u32) };
+    if array.is_null() {
+        return ptr::null_mut();
+    }
+
+    for (index, value) in values.iter().enumerate() {
+        let index = index as i32;
+        // SAFETY: This VT_R8 SAFEARRAY synchronously copies one aligned `f64` from `value`.
+        // Failure destroys the partially initialized array before returning it to the caller.
+        if unsafe { SafeArrayPutElement(array, &index, std::ptr::from_ref(value).cast()) } != S_OK {
+            unsafe {
+                SafeArrayDestroy(array);
+            }
+            return ptr::null_mut();
+        }
+    }
+
+    array
 }
 
 fn move_offset_by_unit(text: &str, offset: usize, unit: TextUnit, count: i32) -> (usize, i32) {
@@ -1506,6 +1664,7 @@ unsafe fn compatible_text_range(
 mod tests {
     use std::ptr;
 
+    use alacritty_terminal::index::{Column, Point};
     use windows_sys::Win32::Foundation::{S_OK, SysFreeString, SysStringLen};
     use windows_sys::Win32::System::Ole::{
         SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetVartype,
@@ -1516,7 +1675,38 @@ mod tests {
     };
     use windows_sys::core::BSTR;
 
-    use super::{IID_ITEXT_PROVIDER2, RawTextProvider};
+    use super::{IID_ITEXT_PROVIDER2, RawTextProvider, RawTextRange, TextProviderLayout};
+    use crate::accessibility::snapshot::VisibleTerminalSnapshot;
+
+    unsafe fn safearray_doubles(
+        array: *mut windows_sys::Win32::System::Com::SAFEARRAY,
+        len: i32,
+    ) -> Vec<f64> {
+        (0..len)
+            .map(|index| {
+                let mut value = 0.0;
+                assert_eq!(
+                    unsafe { SafeArrayGetElement(array, &index, (&mut value as *mut f64).cast()) },
+                    S_OK
+                );
+                value
+            })
+            .collect()
+    }
+
+    unsafe fn assert_empty_double_safearray(
+        array: *mut windows_sys::Win32::System::Com::SAFEARRAY,
+    ) {
+        assert!(!array.is_null());
+        let mut vartype = 0;
+        assert_eq!(unsafe { SafeArrayGetVartype(array, &mut vartype) }, S_OK);
+        assert_eq!(vartype, VT_R8);
+        let mut value = 0.0;
+        assert_ne!(
+            unsafe { SafeArrayGetElement(array, &0, (&mut value as *mut f64).cast()) },
+            S_OK
+        );
+    }
 
     #[test]
     fn document_range_get_text_returns_visible_text() {
@@ -1860,6 +2050,100 @@ mod tests {
             let mut vartype = 0;
             assert_eq!(SafeArrayGetVartype(rectangles, &mut vartype), 0);
             assert_eq!(vartype, VT_R8);
+
+            SafeArrayDestroy(rectangles);
+            (range_vtable.release)(range);
+            (vtable.release)(raw_provider);
+        }
+    }
+
+    #[test]
+    fn text_range_bounding_rectangles() {
+        let provider = RawTextProvider::allocate("abcd\nefgh\nijkl".to_owned());
+        let raw_provider = provider.as_ptr().cast();
+        let vtable = unsafe { (*provider.as_ptr()).vtable };
+        let snapshot = VisibleTerminalSnapshot::from_text_for_tests("abcd\nefgh\nijkl", 4, 3);
+
+        unsafe {
+            (*provider.as_ptr()).set_terminal_state(
+                snapshot.clone(),
+                Some(TextProviderLayout::new(100.0, 200.0, 10.0, 20.0, 4, 3)),
+                Vec::new(),
+                Point::new(0, Column(0)),
+                true,
+            );
+
+            let mut range = ptr::null_mut();
+            assert_eq!((vtable.document_range)(raw_provider, &mut range), S_OK);
+            assert!(!range.is_null());
+            (*(range as *mut RawTextRange)).set_range(1, 7);
+            let range_vtable = *(range as *mut &'static super::RawTextRangeVtable);
+
+            let mut rectangles = ptr::null_mut();
+            assert_eq!((range_vtable.get_bounding_rectangles)(range, &mut rectangles), S_OK);
+            assert_eq!(
+                safearray_doubles(rectangles, 8),
+                [110.0, 200.0, 30.0, 20.0, 100.0, 220.0, 20.0, 20.0]
+            );
+            SafeArrayDestroy(rectangles);
+
+            (*(range as *mut RawTextRange)).set_range(7, 7);
+            rectangles = ptr::null_mut();
+            assert_eq!((range_vtable.get_bounding_rectangles)(range, &mut rectangles), S_OK);
+            assert_empty_double_safearray(rectangles);
+            SafeArrayDestroy(rectangles);
+
+            (*(range as *mut RawTextRange)).set_range(1, 7);
+
+            (*provider.as_ptr()).set_terminal_state(
+                snapshot,
+                Some(TextProviderLayout::new(250.0, 300.0, 15.0, 30.0, 4, 3)),
+                Vec::new(),
+                Point::new(0, Column(0)),
+                true,
+            );
+            rectangles = ptr::null_mut();
+            assert_eq!((range_vtable.get_bounding_rectangles)(range, &mut rectangles), S_OK);
+            assert_eq!(
+                safearray_doubles(rectangles, 8),
+                [265.0, 300.0, 45.0, 30.0, 250.0, 330.0, 30.0, 30.0]
+            );
+            SafeArrayDestroy(rectangles);
+
+            (*provider.as_ptr()).set_terminal_state(
+                VisibleTerminalSnapshot::from_text_for_tests("abcd\nefgh\nijkl", 4, 3),
+                Some(TextProviderLayout::new(250.0, 300.0, 15.0, 30.0, 2, 1)),
+                Vec::new(),
+                Point::new(0, Column(0)),
+                true,
+            );
+            rectangles = ptr::null_mut();
+            assert_eq!((range_vtable.get_bounding_rectangles)(range, &mut rectangles), S_OK);
+            assert_eq!(safearray_doubles(rectangles, 4), [265.0, 300.0, 15.0, 30.0]);
+            SafeArrayDestroy(rectangles);
+
+            (*provider.as_ptr()).set_terminal_state(
+                VisibleTerminalSnapshot::from_text_for_tests("abcd\nefgh\nijkl", 4, 3),
+                Some(TextProviderLayout::new(250.0, 300.0, 0.0, 30.0, 4, 3)),
+                Vec::new(),
+                Point::new(0, Column(0)),
+                true,
+            );
+            rectangles = ptr::null_mut();
+            assert_eq!((range_vtable.get_bounding_rectangles)(range, &mut rectangles), S_OK);
+            assert_empty_double_safearray(rectangles);
+            SafeArrayDestroy(rectangles);
+
+            (*provider.as_ptr()).set_terminal_state(
+                VisibleTerminalSnapshot::from_text_for_tests("replacement", 11, 1),
+                Some(TextProviderLayout::new(250.0, 300.0, 15.0, 30.0, 11, 1)),
+                Vec::new(),
+                Point::new(0, Column(0)),
+                true,
+            );
+            rectangles = ptr::null_mut();
+            assert_eq!((range_vtable.get_bounding_rectangles)(range, &mut rectangles), S_OK);
+            assert_empty_double_safearray(rectangles);
 
             SafeArrayDestroy(rectangles);
             (range_vtable.release)(range);

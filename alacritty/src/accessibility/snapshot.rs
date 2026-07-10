@@ -19,6 +19,7 @@ struct SnapshotRow {
     text: String,
     start_offset: usize,
     column_offsets: Vec<usize>,
+    rendered_columns: usize,
 }
 
 impl VisibleTerminalSnapshot {
@@ -126,6 +127,23 @@ impl VisibleTerminalSnapshot {
         Some(Point::new(row_index, Column(column)))
     }
 
+    /// Convert a byte range on one row to its rendered terminal column span.
+    pub(crate) fn range_columns(
+        &self,
+        row: usize,
+        start: usize,
+        end: usize,
+    ) -> Option<(usize, usize)> {
+        let row = self.rows.get(row)?;
+        let start = start.checked_sub(row.start_offset)?.min(row.text.len());
+        let end = end.checked_sub(row.start_offset)?.min(row.text.len());
+        if start >= end {
+            return None;
+        }
+
+        Some((row.right_biased_column(start), row.right_biased_column(end)))
+    }
+
     /// Convert the terminal's active visible selection to byte offsets into [`Self::text`].
     pub fn selection_offsets<T>(&self, term: &Term<T>) -> Vec<(usize, usize)> {
         let Some(selection) =
@@ -185,9 +203,11 @@ impl SnapshotRow {
     ) -> Self {
         let mut text = String::with_capacity(row.len());
         let mut column_offsets = Vec::with_capacity(row.len() + 1);
+        let mut cell_ends = Vec::with_capacity(row.len());
 
-        for cell in row {
+        for (column, cell) in row.into_iter().enumerate() {
             column_offsets.push(text.len());
+            let start = text.len();
 
             if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
                 continue;
@@ -199,12 +219,22 @@ impl SnapshotRow {
                     text.extend(zerowidth);
                 }
             }
+
+            if text.len() > start {
+                let width = if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+                cell_ends.push((text.len(), (column + width).min(row.len())));
+            }
         }
 
         column_offsets.push(text.len());
         text.truncate(text.trim_end_matches(' ').len());
+        let rendered_columns = cell_ends
+            .into_iter()
+            .rev()
+            .find_map(|(end, column)| (end <= text.len()).then_some(column))
+            .unwrap_or(0);
 
-        Self { text, start_offset, column_offsets }
+        Self { text, start_offset, column_offsets, rendered_columns }
     }
 
     #[cfg(test)]
@@ -217,7 +247,19 @@ impl SnapshotRow {
             column_offsets.push(*char_offsets.get(column).unwrap_or(&text.len()));
         }
 
-        Self { text, start_offset, column_offsets }
+        let rendered_columns = text.chars().count().min(columns);
+        Self { text, start_offset, column_offsets, rendered_columns }
+    }
+
+    fn right_biased_column(&self, offset: usize) -> usize {
+        if offset >= self.text.len() {
+            return self.rendered_columns;
+        }
+
+        self.column_offsets
+            .partition_point(|column_offset| *column_offset <= offset)
+            .saturating_sub(1)
+            .min(self.rendered_columns)
     }
 }
 
@@ -305,6 +347,8 @@ mod tests {
         assert_eq!(snapshot.offset_for_point(Point::new(0, Column(1))), Some("中".len()));
         assert_eq!(snapshot.offset_for_point(Point::new(0, Column(2))), Some("中".len()));
         assert_eq!(snapshot.point_for_offset("中".len()), Some(Point::new(0, Column(1))));
+        assert_eq!(snapshot.range_columns(0, 0, "中".len()), Some((0, 2)));
+        assert_eq!(snapshot.range_columns(0, "中".len(), "中 ".len()), Some((2, 3)));
     }
 
     #[test]
@@ -320,6 +364,7 @@ mod tests {
         assert_eq!(snapshot.offset_for_point(Point::new(0, Column(0))), Some(0));
         assert_eq!(snapshot.offset_for_point(Point::new(0, Column(1))), Some("e\u{301}".len()));
         assert_eq!(snapshot.point_for_offset("e\u{301}".len()), Some(Point::new(0, Column(1))));
+        assert_eq!(snapshot.range_columns(0, 0, "e\u{301}".len()), Some((0, 1)));
     }
 
     #[test]
