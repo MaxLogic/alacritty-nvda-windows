@@ -1,5 +1,5 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
-   <Package Name="Alacritty" UpgradeCode="87c21c74-dbd5-4584-89d5-46d9cd0c40a7" Language="1033" Codepage="1252" Version="0.18.0-dev" Manufacturer="Alacritty" InstallerVersion="200">
+   <Package Name="Alacritty NVDA Windows" UpgradeCode="bb3e7b2c-e23c-459a-8518-440bf3f7e602" Language="1033" Codepage="1252" Version="$(var.ProductVersion)" Manufacturer="MaxLogic" InstallerVersion="200">
       <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
       <Icon Id="AlacrittyIco" SourceFile=".\alacritty\windows\alacritty.ico" />
       <WixVariable Id="WixUILicenseRtf" Value=".\alacritty\windows\wix\license.rtf" />
@@ -8,52 +8,52 @@
       <ui:WixUI Id="WixUI_Minimal" />
       <Feature Id="ProductFeature" Title="ConsoleApp" Level="1">
          <ComponentRef Id="AlacrittyExe" />
-         <ComponentRef Id="AlacrittyShortcut" />
+         <ComponentRef Id="AlacrittyNvdaShortcut" />
          <ComponentRef Id="ModifyPathEnv" />
          <ComponentRef Id="ContextMenu" />
          <ComponentRef Id="ContextMenuFolder" />
       </Feature>
       <!-- Application binaries -->
-      <DirectoryRef Id="AlacrittyProgramFiles">
+      <DirectoryRef Id="AlacrittyNvdaProgramFiles">
          <Component Id="AlacrittyExe">
             <File Id="AlacrittyExeFile" Source=".\target\release\alacritty.exe" Name="alacritty.exe" KeyPath="yes" />
          </Component>
       </DirectoryRef>
-      <DirectoryRef Id="AlacrittyProgramMenu">
+      <DirectoryRef Id="AlacrittyNvdaProgramMenu">
          <!-- Application shortcut -->
-         <Component Id="AlacrittyShortcut" Guid="aa36e61a-23cd-4383-b744-2f78e912f0dc">
-            <Shortcut Id="AlacrittyShortcutFile" Name="Alacritty" Description="A cross-platform, GPU-accelerated terminal emulator" Target="[AlacrittyProgramFiles]alacritty.exe" />
-            <RemoveFolder Id="AlacrittyProgramMenu" On="uninstall" />
-            <RegistryValue Root="HKCU" Key="Software\Microsoft\Alacritty" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+         <Component Id="AlacrittyNvdaShortcut" Guid="17bc0e57-c9af-4089-a075-88bccb3b5381">
+            <Shortcut Id="AlacrittyNvdaShortcutFile" Name="Alacritty NVDA Windows" Description="Alacritty fork with Windows UIA support for NVDA" Target="[AlacrittyNvdaProgramFiles]alacritty.exe" />
+            <RemoveFolder Id="AlacrittyNvdaProgramMenu" On="uninstall" />
+            <RegistryValue Root="HKCU" Key="Software\Microsoft\AlacrittyNVDAWindows" Name="installed" Type="integer" Value="1" KeyPath="yes" />
          </Component>
       </DirectoryRef>
-      <DirectoryRef Id="AlacrittyProgramFiles">
+      <DirectoryRef Id="AlacrittyNvdaProgramFiles">
          <!-- Add to PATH -->
-         <Component Id="ModifyPathEnv" Guid="edf0b679-9eb6-46f7-a5d1-5160f30acb34" KeyPath="yes">
-            <Environment Id="PathEnv" Value="[AlacrittyProgramFiles]" Name="PATH" Permanent="no" Part="first" Action="set" System="yes" />
+         <Component Id="ModifyPathEnv" Guid="d123fc17-fa68-4967-9184-85959ea7173c" KeyPath="yes">
+            <Environment Id="PathEnv" Value="[AlacrittyNvdaProgramFiles]" Name="PATH" Permanent="no" Part="first" Action="set" System="yes" />
          </Component>
       </DirectoryRef>
       <StandardDirectory Id="ProgramFiles64Folder">
-         <Directory Id="AlacrittyProgramFiles" Name="Alacritty" />
+         <Directory Id="AlacrittyNvdaProgramFiles" Name="Alacritty NVDA Windows" />
       </StandardDirectory>
       <StandardDirectory Id="ProgramMenuFolder">
-         <Directory Id="AlacrittyProgramMenu" Name="Alacritty" />
+         <Directory Id="AlacrittyNvdaProgramMenu" Name="Alacritty NVDA Windows" />
       </StandardDirectory>
       <!-- Add context menu -->
-      <Component Id="ContextMenu" Guid="449f9121-f7b9-41fe-82da-52349ea8ff91" Directory="TARGETDIR">
-         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\Open Alacritty here\command">
-            <RegistryValue Type="string" Value='[AlacrittyProgramFiles]alacritty.exe --working-directory "%v"' KeyPath="yes" />
+      <Component Id="ContextMenu" Guid="4c089f5a-fee2-4c4f-a54a-eab16377ec24" Directory="TARGETDIR">
+         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\Open Alacritty NVDA here\command">
+            <RegistryValue Type="string" Value='[AlacrittyNvdaProgramFiles]alacritty.exe --working-directory "%v"' KeyPath="yes" />
          </RegistryKey>
-         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\Open Alacritty here">
-            <RegistryValue Type="string" Name="Icon" Value="[AlacrittyProgramFiles]alacritty.exe" />
+         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\Open Alacritty NVDA here">
+            <RegistryValue Type="string" Name="Icon" Value="[AlacrittyNvdaProgramFiles]alacritty.exe" />
          </RegistryKey>
       </Component>
-      <Component Id="ContextMenuFolder" Guid="69483b38-a267-433f-9395-60827963347a" Directory="TARGETDIR">
-         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\shell\Open Alacritty here\command">
-            <RegistryValue Type="string" Value='[AlacrittyProgramFiles]alacritty.exe --working-directory "%v"' KeyPath="yes" />
+      <Component Id="ContextMenuFolder" Guid="b4f30667-2dea-4c73-82c9-8589c38127e0" Directory="TARGETDIR">
+         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\shell\Open Alacritty NVDA here\command">
+            <RegistryValue Type="string" Value='[AlacrittyNvdaProgramFiles]alacritty.exe --working-directory "%v"' KeyPath="yes" />
          </RegistryKey>
-         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\shell\Open Alacritty here">
-            <RegistryValue Type="string" Name="Icon" Value="[AlacrittyProgramFiles]alacritty.exe" />
+         <RegistryKey Root="HKCU" Key="Software\Classes\Directory\shell\Open Alacritty NVDA here">
+            <RegistryValue Type="string" Name="Icon" Value="[AlacrittyNvdaProgramFiles]alacritty.exe" />
          </RegistryKey>
       </Component>
    </Package>
