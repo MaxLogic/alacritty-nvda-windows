@@ -32,8 +32,8 @@ use windows_sys::Win32::UI::Accessibility::{
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, ISMEX_SEND, InSendMessageEx, OBJID_CLIENT, PostMessageW, WM_APP, WM_GETOBJECT,
-    WM_NCDESTROY,
+    CreateCaret, DestroyCaret, GetClientRect, ISMEX_SEND, InSendMessageEx, OBJID_CLIENT,
+    PostMessageW, SetCaretPos, WM_APP, WM_GETOBJECT, WM_NCDESTROY,
 };
 use windows_sys::core::{BSTR, GUID, HRESULT};
 use winit::raw_window_handle::RawWindowHandle;
@@ -190,6 +190,93 @@ struct PublishedSnapshotChanges {
     text_changed: bool,
     selection_changed: bool,
     active_text_position_changed: bool,
+}
+
+type SystemCaretGeometry = (i32, i32, i32, i32);
+
+#[derive(Debug, Default)]
+struct SystemCaret {
+    geometry: Option<SystemCaretGeometry>,
+    created: bool,
+}
+
+impl SystemCaret {
+    fn update(&mut self, hwnd: HWND, geometry: SystemCaretGeometry) {
+        let dimensions_changed = self
+            .geometry
+            .is_some_and(|(_, _, width, height)| (width, height) != (geometry.2, geometry.3));
+        self.geometry = Some(geometry);
+
+        if !self.created || dimensions_changed {
+            if self.created {
+                unsafe {
+                    DestroyCaret();
+                }
+                self.created = false;
+            }
+
+            // A system caret is hidden until ShowCaret is called. Alacritty keeps rendering its
+            // own cursor, while legacy accessibility clients can still query this caret's position.
+            if unsafe { CreateCaret(hwnd, ptr::null_mut(), geometry.2, geometry.3) } == 0 {
+                trace_uia("accessibility.system_caret CreateCaret failed");
+                return;
+            }
+            self.created = true;
+        }
+
+        if unsafe { SetCaretPos(geometry.0, geometry.1) } == 0 {
+            trace_uia("accessibility.system_caret SetCaretPos failed");
+        }
+    }
+
+    fn set_focused(&mut self, hwnd: HWND, focused: bool) {
+        if focused {
+            if let Some(geometry) = self.geometry {
+                self.update(hwnd, geometry);
+            }
+        } else {
+            self.destroy();
+        }
+    }
+
+    fn destroy(&mut self) {
+        if self.created {
+            unsafe {
+                DestroyCaret();
+            }
+            self.created = false;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.destroy();
+        self.geometry = None;
+    }
+}
+
+fn should_expose_system_caret(focused: bool, cursor_visible: bool) -> bool {
+    focused && cursor_visible
+}
+
+fn system_caret_geometry(
+    cursor: Point<usize>,
+    size_info: &SizeInfo,
+) -> Option<SystemCaretGeometry> {
+    let cell_width = size_info.cell_width();
+    let cell_height = size_info.cell_height();
+    if !cell_width.is_finite() || !cell_height.is_finite() || cell_width <= 0. || cell_height <= 0.
+    {
+        return None;
+    }
+
+    let x = size_info.padding_x() + cursor.column.0 as f32 * cell_width;
+    let y = size_info.padding_y() + cursor.line as f32 * cell_height;
+    Some((
+        x.round() as i32,
+        y.round() as i32,
+        cell_width.ceil().max(1.) as i32,
+        cell_height.ceil().max(1.) as i32,
+    ))
 }
 
 impl PublishedSnapshotState {
@@ -416,6 +503,7 @@ pub struct WindowsAccessibility {
     provider: NonNull<RawProvider>,
     focused: AtomicBool,
     last_snapshot: Mutex<Option<PublishedSnapshotState>>,
+    system_caret: Mutex<SystemCaret>,
     event_throttle: Mutex<UiaEventThrottle>,
 }
 
@@ -456,6 +544,7 @@ impl WindowsAccessibility {
                 provider,
                 focused: AtomicBool::new(focused),
                 last_snapshot: Mutex::new(None),
+                system_caret: Mutex::new(SystemCaret::default()),
                 event_throttle: Mutex::new(UiaEventThrottle::new(
                     UIA_EVENT_THROTTLE,
                     Instant::now(),
@@ -473,6 +562,19 @@ impl WindowsAccessibility {
         let layout = self.layout_for_snapshot(&snapshot, size_info);
         let selection = snapshot.selection_offsets(term);
         let cursor_visible = term.mode().contains(TermMode::SHOW_CURSOR);
+        let raw_cursor = snapshot.cursor();
+        let focused = self.focused.load(Ordering::Acquire);
+        let mut system_caret = self.system_caret.lock().expect("system caret lock poisoned");
+        if should_expose_system_caret(focused, cursor_visible) {
+            if let Some(geometry) = system_caret_geometry(raw_cursor, size_info) {
+                system_caret.update(self.hwnd, geometry);
+            } else {
+                system_caret.clear();
+            }
+        } else {
+            system_caret.clear();
+        }
+        drop(system_caret);
         let (cursor, changes, notification) = self.snapshot_changes(
             snapshot.clone(),
             cursor_visible,
@@ -501,6 +603,10 @@ impl WindowsAccessibility {
         }
 
         trace_uia(&format!("accessibility.focus focused={focused}"));
+        self.system_caret
+            .lock()
+            .expect("system caret lock poisoned")
+            .set_focused(self.hwnd, focused);
         unsafe {
             (*self.provider.as_ptr()).set_focused(focused);
         }
@@ -638,6 +744,7 @@ impl WindowsAccessibility {
 
 impl Drop for WindowsAccessibility {
     fn drop(&mut self) {
+        self.system_caret.get_mut().expect("system caret lock poisoned").destroy();
         unsafe {
             // SAFETY: `provider` and the subclass were installed together in `new` for this
             // HWND. Teardown makes the provider unavailable and removes the subclass before the
@@ -1486,9 +1593,11 @@ mod tests {
         PublishedSnapshotState, RawProvider, TerminalProvider, VisibleTerminalSnapshot,
         accessibility_cursor, add_ref, hwnd_from_raw_window_handle, output_notification_text,
         provider_for_getobject, release, should_handle_wm_getobject, take_deferred_teardown,
-        teardown_provider, update_focus_state,
+        system_caret_geometry, should_expose_system_caret, teardown_provider, update_focus_state,
+        SystemCaret,
     };
     use crate::accessibility::text_pattern::TextProviderLayout;
+    use crate::display::SizeInfo;
     use alacritty_terminal::index::{Column, Point};
 
     #[test]
@@ -1678,6 +1787,30 @@ mod tests {
         let input = "  test6 test7 test8 test9 test10";
 
         assert_eq!(accessibility_cursor(raw, true, input, Some(previous)), raw);
+    }
+
+    #[test]
+    fn system_caret_uses_raw_cursor_client_coordinates() {
+        let size = SizeInfo::new(800., 600., 10., 20., 5., 7., false);
+
+        assert_eq!(system_caret_geometry(Point::new(2, Column(3)), &size), Some((35, 47, 10, 20)));
+    }
+
+    #[test]
+    fn system_caret_requires_focused_visible_terminal_cursor() {
+        assert!(should_expose_system_caret(true, true));
+        assert!(!should_expose_system_caret(false, true));
+        assert!(!should_expose_system_caret(true, false));
+    }
+
+    #[test]
+    fn hidden_terminal_cursor_clears_saved_system_caret_geometry() {
+        let mut caret = SystemCaret { geometry: Some((35, 47, 10, 20)), created: false };
+
+        caret.clear();
+
+        assert_eq!(caret.geometry, None);
+        assert!(!caret.created);
     }
 
     #[test]
