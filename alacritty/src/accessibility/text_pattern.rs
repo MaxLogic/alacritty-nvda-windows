@@ -1552,11 +1552,12 @@ fn caret_word_bounds(text: &str, offset: usize) -> (usize, usize) {
         && offset > 0
     {
         let previous = previous_char_boundary(text, offset - 1);
-        if text[previous..offset].chars().next().is_some_and(is_word_character)
-            && let Some(next_word) =
+        if text[previous..offset].chars().next().is_some_and(is_word_character) {
+            if let Some(next_word) =
                 text[offset..].char_indices().find(|(_, character)| is_word_character(*character))
-        {
-            return word_bounds(text, offset + next_word.0);
+            {
+                return word_bounds(text, offset + next_word.0);
+            }
         }
     }
 
