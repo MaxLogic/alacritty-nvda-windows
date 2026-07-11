@@ -24,3 +24,13 @@ all the colors of a standard terminal. The third enumerates the 24-bit colors.
 ./colors.sh
 ./24-bit-colors.sh
 ```
+
+## Windows Accessibility Gate
+
+Run the local Windows validation gate for accessibility work. This checks Rust
+formatting with nightly rustfmt, runs Clippy for the Windows MSVC target, checks
+the Alacritty binary crate for that target, and runs the terminal crate tests.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-windows-accessibility.ps1
+```
