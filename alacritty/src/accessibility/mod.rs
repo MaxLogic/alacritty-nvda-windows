@@ -1,0 +1,17 @@
+//! Accessibility support.
+
+#[cfg(windows)]
+pub mod event_throttle;
+#[cfg(windows)]
+pub(crate) mod ffi;
+#[cfg(windows)]
+pub mod range_from_point;
+#[cfg(windows)]
+pub mod selection;
+pub mod snapshot;
+#[cfg(windows)]
+pub mod text_pattern;
+#[cfg(windows)]
+pub mod text_range;
+#[cfg(windows)]
+pub mod windows_provider;
