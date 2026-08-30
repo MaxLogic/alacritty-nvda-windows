@@ -409,6 +409,9 @@ impl ApplicationHandler<Event> for Processor {
             (EventType::Terminal(TerminalEvent::Wakeup), Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     window_context.dirty = true;
+                    #[cfg(windows)]
+                    window_context.draw_pending_frame(&mut self.scheduler);
+                    #[cfg(not(windows))]
                     if window_context.display.window.has_frame {
                         window_context.display.window.request_redraw();
                     }
@@ -443,6 +446,9 @@ impl ApplicationHandler<Event> for Processor {
             (EventType::Frame, Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     window_context.display.window.has_frame = true;
+                    #[cfg(windows)]
+                    window_context.draw_pending_frame(&mut self.scheduler);
+                    #[cfg(not(windows))]
                     if window_context.dirty {
                         window_context.display.window.request_redraw();
                     }
@@ -478,6 +484,8 @@ impl ApplicationHandler<Event> for Processor {
                 &mut self.scheduler,
                 WinitEvent::AboutToWait,
             );
+            #[cfg(windows)]
+            window_context.draw_pending_frame(&mut self.scheduler);
         }
 
         // Update the scheduler after event processing to ensure

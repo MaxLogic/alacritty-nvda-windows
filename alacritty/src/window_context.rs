@@ -44,6 +44,11 @@ use crate::message_bar::MessageBuffer;
 use crate::scheduler::Scheduler;
 use crate::{input, renderer};
 
+#[cfg(windows)]
+fn should_draw_pending_frame(dirty: bool, has_frame: bool, occluded: bool) -> bool {
+    dirty && has_frame && !occluded
+}
+
 /// Event context for one individual Alacritty window.
 pub struct WindowContext {
     pub message_buffer: MessageBuffer,
@@ -364,7 +369,10 @@ impl WindowContext {
 
     /// Draw the window.
     pub fn draw(&mut self, scheduler: &mut Scheduler) {
-        self.display.window.requested_redraw = false;
+        #[cfg(not(windows))]
+        {
+            self.display.window.requested_redraw = false;
+        }
 
         if self.occluded {
             return;
@@ -377,6 +385,14 @@ impl WindowContext {
 
         // Request immediate re-draw if visual bell animation is not finished yet.
         if !self.display.visual_bell.completed() {
+            #[cfg(windows)]
+            {
+                // The frame timer will drive the next draw without relying on low-priority
+                // `WM_PAINT` delivery.
+                self.dirty = true;
+            }
+
+            #[cfg(not(windows))]
             // We can get an OS redraw which bypasses alacritty's frame throttling, thus
             // marking the window as dirty when we don't have frame yet.
             if self.display.window.has_frame {
@@ -395,6 +411,14 @@ impl WindowContext {
             &self.config,
             &mut self.search_state,
         );
+    }
+
+    /// Draw pending Windows updates without waiting for a `WM_PAINT`-driven callback.
+    #[cfg(windows)]
+    pub fn draw_pending_frame(&mut self, scheduler: &mut Scheduler) {
+        if should_draw_pending_frame(self.dirty, self.display.window.has_frame, self.occluded) {
+            self.draw(scheduler);
+        }
     }
 
     /// Process events for this terminal window.
@@ -482,6 +506,10 @@ impl WindowContext {
             self.mouse.hint_highlight_dirty = false;
         }
 
+        // Windows application-driven frames are drawn directly from event-loop callbacks. This
+        // keeps terminal rendering independent from low-priority `WM_PAINT` delivery, while
+        // `WindowEvent::RedrawRequested` still handles repaint requests from the OS.
+        #[cfg(not(windows))]
         // Don't call `request_redraw` when event is `RedrawRequested` since the `dirty` flag
         // represents the current frame, but redraw is for the next frame.
         if self.dirty
@@ -564,5 +592,16 @@ impl Drop for WindowContext {
     fn drop(&mut self) {
         // Shutdown the terminal's PTY.
         let _ = self.notifier.0.send(Msg::Shutdown);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn windows_redraw_does_not_wait_for_os_callback() {
+        assert!(super::should_draw_pending_frame(true, true, false));
+        assert!(!super::should_draw_pending_frame(false, true, false));
+        assert!(!super::should_draw_pending_frame(true, false, false));
+        assert!(!super::should_draw_pending_frame(true, true, true));
     }
 }
