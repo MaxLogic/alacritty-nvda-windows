@@ -108,7 +108,6 @@ pub struct Window {
     pub scale_factor: f64,
 
     /// Flag indicating whether redraw was requested.
-    #[cfg(not(windows))]
     pub requested_redraw: bool,
 
     /// Hold the window when terminal exits.
@@ -206,7 +205,6 @@ impl Window {
 
         Ok(Self {
             hold: options.terminal_options.hold,
-            #[cfg(not(windows))]
             requested_redraw: false,
             title: identity.title,
             current_mouse_cursor,
@@ -259,7 +257,6 @@ impl Window {
     }
 
     #[inline]
-    #[cfg(not(windows))]
     pub fn request_redraw(&mut self) {
         if !self.requested_redraw {
             self.requested_redraw = true;

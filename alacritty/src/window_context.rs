@@ -44,11 +44,6 @@ use crate::message_bar::MessageBuffer;
 use crate::scheduler::Scheduler;
 use crate::{input, renderer};
 
-#[cfg(windows)]
-fn should_draw_pending_frame(dirty: bool, has_frame: bool, occluded: bool) -> bool {
-    dirty && has_frame && !occluded
-}
-
 /// Event context for one individual Alacritty window.
 pub struct WindowContext {
     pub message_buffer: MessageBuffer,
@@ -369,10 +364,7 @@ impl WindowContext {
 
     /// Draw the window.
     pub fn draw(&mut self, scheduler: &mut Scheduler) {
-        #[cfg(not(windows))]
-        {
-            self.display.window.requested_redraw = false;
-        }
+        self.display.window.requested_redraw = false;
 
         if self.occluded {
             return;
@@ -506,13 +498,10 @@ impl WindowContext {
             self.mouse.hint_highlight_dirty = false;
         }
 
-        // Windows application-driven frames are drawn directly from event-loop callbacks. This
-        // keeps terminal rendering independent from low-priority `WM_PAINT` delivery, while
-        // `WindowEvent::RedrawRequested` still handles repaint requests from the OS.
-        #[cfg(not(windows))]
         // Don't call `request_redraw` when event is `RedrawRequested` since the `dirty` flag
         // represents the current frame, but redraw is for the next frame.
-        if self.dirty
+        if !cfg!(windows)
+            && self.dirty
             && self.display.window.has_frame
             && !self.occluded
             && !matches!(event, WinitEvent::WindowEvent { event: WindowEvent::RedrawRequested, .. })
@@ -593,6 +582,11 @@ impl Drop for WindowContext {
         // Shutdown the terminal's PTY.
         let _ = self.notifier.0.send(Msg::Shutdown);
     }
+}
+
+#[cfg(windows)]
+fn should_draw_pending_frame(dirty: bool, has_frame: bool, occluded: bool) -> bool {
+    dirty && has_frame && !occluded
 }
 
 #[cfg(all(test, windows))]
