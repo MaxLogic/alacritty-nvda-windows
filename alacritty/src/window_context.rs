@@ -590,7 +590,7 @@ fn should_draw_pending_frame(dirty: bool, has_frame: bool, occluded: bool) -> bo
 }
 
 #[cfg(all(test, windows))]
-mod tests {
+mod windows_redraw_tests {
     #[test]
     fn windows_redraw_does_not_wait_for_os_callback() {
         assert!(super::should_draw_pending_frame(true, true, false));
