@@ -2082,10 +2082,9 @@ mod tests {
 
             let mut rectangles = ptr::null_mut();
             assert_eq!((range_vtable.get_bounding_rectangles)(range, &mut rectangles), S_OK);
-            assert_eq!(
-                safearray_doubles(rectangles, 8),
-                [110.0, 200.0, 30.0, 20.0, 100.0, 220.0, 20.0, 20.0]
-            );
+            assert_eq!(safearray_doubles(rectangles, 8), [
+                110.0, 200.0, 30.0, 20.0, 100.0, 220.0, 20.0, 20.0
+            ]);
             SafeArrayDestroy(rectangles);
 
             (*(range as *mut RawTextRange)).set_range(7, 7);
@@ -2105,10 +2104,9 @@ mod tests {
             );
             rectangles = ptr::null_mut();
             assert_eq!((range_vtable.get_bounding_rectangles)(range, &mut rectangles), S_OK);
-            assert_eq!(
-                safearray_doubles(rectangles, 8),
-                [265.0, 300.0, 45.0, 30.0, 250.0, 330.0, 30.0, 30.0]
-            );
+            assert_eq!(safearray_doubles(rectangles, 8), [
+                265.0, 300.0, 45.0, 30.0, 250.0, 330.0, 30.0, 30.0
+            ]);
             SafeArrayDestroy(rectangles);
 
             (*provider.as_ptr()).set_terminal_state(

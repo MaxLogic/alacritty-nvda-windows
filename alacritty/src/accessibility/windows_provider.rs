@@ -1590,11 +1590,11 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{OBJID_CLIENT, WM_GETOBJECT};
 
     use super::{
-        PublishedSnapshotState, RawProvider, TerminalProvider, VisibleTerminalSnapshot,
-        accessibility_cursor, add_ref, hwnd_from_raw_window_handle, output_notification_text,
-        provider_for_getobject, release, should_handle_wm_getobject, take_deferred_teardown,
-        system_caret_geometry, should_expose_system_caret, teardown_provider, update_focus_state,
-        SystemCaret,
+        PublishedSnapshotState, RawProvider, SystemCaret, TerminalProvider,
+        VisibleTerminalSnapshot, accessibility_cursor, add_ref, hwnd_from_raw_window_handle,
+        output_notification_text, provider_for_getobject, release, should_expose_system_caret,
+        should_handle_wm_getobject, system_caret_geometry, take_deferred_teardown,
+        teardown_provider, update_focus_state,
     };
     use crate::accessibility::text_pattern::TextProviderLayout;
     use crate::display::SizeInfo;
