@@ -17,6 +17,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Fixed
 
+- Windows event delivery and shutdown stalling after the native message queue fills
 - Visual updates stalling on Windows while the event queue remains busy
 - Spurious "Failed to set new owner of XCB selection" warnings on X11
 - Lacking permissions to launch software sending Apple events

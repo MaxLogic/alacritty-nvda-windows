@@ -1,0 +1,203 @@
+--- a/src/platform_impl/windows/event_loop.rs
++++ b/src/platform_impl/windows/event_loop.rs
+@@ -8,7 +8,7 @@
+ use std::marker::PhantomData;
+ use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle, RawHandle};
+ use std::rc::Rc;
+-use std::sync::atomic::{AtomicU32, Ordering};
++use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+ use std::sync::mpsc::{self, Receiver, Sender};
+ use std::sync::{Arc, Mutex, MutexGuard};
+ use std::time::{Duration, Instant};
+@@ -154,6 +154,7 @@
+ pub struct EventLoop<T: 'static> {
+     user_event_sender: Sender<T>,
+     user_event_receiver: Receiver<T>,
++    user_event_pending: Arc<AtomicUsize>,
+     window_target: RootAEL,
+     msg_hook: Option<Box<dyn FnMut(*const c_void) -> bool + 'static>>,
+     // It is a timer used on timed waits.
+@@ -213,6 +214,7 @@
+         Ok(EventLoop {
+             user_event_sender,
+             user_event_receiver,
++            user_event_pending: Arc::new(AtomicUsize::new(0)),
+             window_target: RootAEL {
+                 p: ActiveEventLoop { thread_id, thread_msg_target, runner_shared },
+                 _marker: PhantomData,
+@@ -242,26 +244,19 @@
+ 
+             let event_loop_windows_ref = &self.window_target;
+             let user_event_receiver = &self.user_event_receiver;
++            let user_event_pending = &self.user_event_pending;
+             // # Safety
+             // We make sure to call runner.clear_event_handler() before
+             // returning
+             unsafe {
+                 runner.set_event_handler(move |event| {
+-                    // the shared `EventLoopRunner` is not parameterized
+-                    // `EventLoopProxy::send_event()` calls `PostMessage`
+-                    // to wakeup and dispatch a placeholder `UserEvent`,
+-                    // when we received the placeholder event here, the
+-                    // real UserEvent(T) should already be put in the
+-                    // mpsc channel and ready to be pulled
+-                    let event = match event.map_nonuser_event() {
+-                        Ok(non_user_event) => non_user_event,
+-                        Err(_user_event_placeholder) => Event::UserEvent(
+-                            user_event_receiver
+-                                .try_recv()
+-                                .expect("user event signaled but not received"),
+-                        ),
+-                    };
+-                    event_handler(event, event_loop_windows_ref)
++                    dispatch_queued_user_events(
++                        event,
++                        user_event_receiver,
++                        user_event_pending,
++                        event_loop_windows_ref,
++                        &mut event_handler,
++                    )
+                 });
+             }
+         }
+@@ -304,6 +299,7 @@
+             let runner = &self.window_target.p.runner_shared;
+             let event_loop_windows_ref = &self.window_target;
+             let user_event_receiver = &self.user_event_receiver;
++            let user_event_pending = &self.user_event_pending;
+ 
+             // # Safety
+             // We make sure to call runner.clear_event_handler() before
+@@ -314,15 +310,13 @@
+             // event handler.
+             unsafe {
+                 runner.set_event_handler(move |event| {
+-                    let event = match event.map_nonuser_event() {
+-                        Ok(non_user_event) => non_user_event,
+-                        Err(_user_event_placeholder) => Event::UserEvent(
+-                            user_event_receiver
+-                                .recv()
+-                                .expect("user event signaled but not received"),
+-                        ),
+-                    };
+-                    event_handler(event, event_loop_windows_ref)
++                    dispatch_queued_user_events(
++                        event,
++                        user_event_receiver,
++                        user_event_pending,
++                        event_loop_windows_ref,
++                        &mut event_handler,
++                    )
+                 });
+                 runner.wakeup();
+             }
+@@ -380,6 +374,15 @@
+         // `MsgWaitForMultipleObjectsEx`.
+         //
+         runner.prepare_wait();
++        // AboutToWait can request exit or enqueue work. Never sleep over either.
++        if runner.exit_code().is_some() {
++            return;
++        }
++        let timeout = if self.user_event_pending.load(Ordering::Acquire) != 0 {
++            Some(Duration::ZERO)
++        } else {
++            timeout
++        };
+         wait_for_messages_impl(&mut self.high_resolution_timer, runner.control_flow(), timeout);
+         // Before we potentially exit, make sure to consistently emit an event for the wake up
+         runner.wakeup();
+@@ -439,6 +442,7 @@
+         EventLoopProxy {
+             target_window: self.window_target.p.thread_msg_target,
+             event_send: self.user_event_sender.clone(),
++            pending: self.user_event_pending.clone(),
+         }
+     }
+ 
+@@ -816,24 +820,77 @@
+ pub struct EventLoopProxy<T: 'static> {
+     target_window: HWND,
+     event_send: Sender<T>,
++    pending: Arc<AtomicUsize>,
+ }
+ unsafe impl<T: Send + 'static> Send for EventLoopProxy<T> {}
+ 
+ impl<T: 'static> Clone for EventLoopProxy<T> {
+     fn clone(&self) -> Self {
+-        Self { target_window: self.target_window, event_send: self.event_send.clone() }
++        Self {
++            target_window: self.target_window,
++            event_send: self.event_send.clone(),
++            pending: self.pending.clone(),
++        }
+     }
+ }
+ 
+ impl<T: 'static> EventLoopProxy<T> {
+     pub fn send_event(&self, event: T) -> Result<(), EventLoopClosed<T>> {
+-        self.event_send
+-            .send(event)
+-            .map(|result| {
+-                unsafe { PostMessageW(self.target_window, USER_EVENT_MSG_ID.get(), 0, 0) };
+-                result
+-            })
+-            .map_err(|e| EventLoopClosed(e.0))
++        // Reserve before publishing so a concurrent receiver cannot underflow the count.
++        let previous = self.pending.fetch_add(1, Ordering::AcqRel);
++        match self.event_send.send(event) {
++            Ok(()) => {
++                if previous == 0 {
++                    // A wake is a hint, not one token per event. If the native queue is
++                    // full, its existing messages wake the loop; pending work is also
++                    // checked before every native wait.
++                    unsafe { PostMessageW(self.target_window, USER_EVENT_MSG_ID.get(), 0, 0) };
++                }
++                Ok(())
++            },
++            Err(error) => {
++                self.pending.fetch_sub(1, Ordering::AcqRel);
++                Err(EventLoopClosed(error.0))
++            },
++        }
++    }
++}
++
++// Dispatch finite batches so event producers cannot monopolize the GUI thread.
++// Extra/stale native wake messages are harmless. AboutToWait must follow the
++// batch, since applications use it to flush their own accumulated events.
++fn dispatch_queued_user_events<T: 'static, F>(
++    event: Event<UserEventPlaceholder>,
++    receiver: &Receiver<T>,
++    pending: &AtomicUsize,
++    target: &RootAEL,
++    handler: &mut F,
++) where
++    F: FnMut(Event<T>, &RootAEL),
++{
++    let drain = |handler: &mut F| {
++        for _ in 0..256 {
++            if target.exiting() {
++                break;
++            }
++            let Ok(event) = receiver.try_recv() else { break; };
++            pending.fetch_sub(1, Ordering::AcqRel);
++            handler(Event::UserEvent(event), target);
++        }
++    };
++    match event.map_nonuser_event() {
++        Err(_) => drain(handler),
++        Ok(Event::AboutToWait) => {
++            drain(handler);
++            handler(Event::AboutToWait, target);
++        },
++        // Initial Resumed must precede user events queued before run_app.
++        Ok(event @ Event::NewEvents(crate::event::StartCause::Init)) => handler(event, target),
++        Ok(event @ Event::NewEvents(_)) => {
++            handler(event, target);
++            drain(handler);
++        },
++        Ok(event) => handler(event, target),
+     }
+ }
+ 
