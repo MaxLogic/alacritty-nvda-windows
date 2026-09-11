@@ -1,0 +1,10 @@
+{
+  "winit": "0.30.13",
+  "source_branch": "fix/windows-event-delivery",
+  "source_base": "abdec263672bfdd010f00e1ea268efde375b4db0",
+  "combined_test_base": "737b44bcb64ca6d04187b8b88f7f16fd30a65ae1",
+  "original_file_sha256": "f99c748e189ea8ce4bde08ec186ee27306756ce93d5235371e198c07e582c52d",
+  "candidate_file_sha256": "1883795f694632af5815fa25ab893d47427e917dcfe7bde2e7645335a626e697",
+  "patch_sha256": "53f8b234bc1d4a972dee3557ec3453373a08222a4ee4c6f9b53ac117359a02ec",
+  "scope": "Vendored into the source workspace on 2026-09-11; local deployment authorized, public publication not performed."
+}
