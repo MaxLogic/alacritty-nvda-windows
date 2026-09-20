@@ -168,7 +168,8 @@ fn writer(
         let now = Instant::now();
         if heartbeat_due(now, &mut deadline, HEARTBEAT) {
             file.write_record(&format!(
-                "t_us={} epoch_start_ms={epoch} stage=heartbeat pty_bytes={} gui_ticks={} dropped={}\n",
+                "t_us={} epoch_start_ms={epoch} stage=heartbeat pty_bytes={} gui_ticks={} \
+                 dropped={}\n",
                 now.duration_since(start).as_micros(),
                 counters.pty_bytes.load(Ordering::Relaxed),
                 counters.gui_ticks.load(Ordering::Relaxed),
