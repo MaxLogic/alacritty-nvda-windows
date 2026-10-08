@@ -2,14 +2,19 @@
 
 The workspace patches crates.io winit to `vendor/winit` so every ordinary Cargo
 build includes the Windows pending-event fix. This is the complete published
-0.30.13 crate, excluding Cargo's local `.cargo-ok` cache marker, with only
-`src/platform_impl/windows/event_loop.rs` changed. The upstream license and VCS
+0.30.13 crate, excluding Cargo's local `.cargo-ok` cache marker, with
+`src/platform_impl/windows/event_loop.rs` patched and a Windows regression in
+`src/platform_impl/windows/window.rs`. The upstream license and VCS
 metadata are retained.
 
 The patch prevents accepted user events from becoming permanently stranded when
 Windows rejects a wake notification. Focus reporting and the NVDA provider remain
 enabled. The vendored crate is excluded from the Alacritty workspace so upstream
 examples, tests and formatting do not become Alacritty workspace targets.
+
+The TaskbarCreated handler also releases WindowState before shell COM calls can
+reenter the window procedure. See `docs/investigations/windows-taskbar-reentry/`
+for the captured hang and deterministic native regression.
 
 `winit-files.sha256.json` records the exact crate files. The reviewable patch,
 upstream/patched backend hashes, incident evidence and Windows RED/GREEN verifier

@@ -21,6 +21,7 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Fixed
 
+- Windows deadlock when taskbar recreation reenters the window callback
 - Windows event delivery and shutdown stalling after the native message queue fills
 - Visual updates stalling on Windows while the event queue remains busy
 - Spurious "Failed to set new owner of XCB selection" warnings on X11

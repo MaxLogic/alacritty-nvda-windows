@@ -69,6 +69,12 @@ def main():
         exe = target / "debug/winit-wake-repro.exe"
         for mode in modes:
             run(f"{kind}-{mode}", [str(exe), mode], 101 if kind == "baseline" else 0)
+
+    run("candidate-taskbar-reentry", [
+        "cargo", "test", "--offline", "--manifest-path", str(patched / "Cargo.toml"),
+        "--lib", "--no-default-features", "taskbar_created_allows_synchronous_window_reentry",
+        "--target-dir", str(output / "target-taskbar"),
+    ], 0)
     print(f"Complete; proof retained in {output}")
 
 

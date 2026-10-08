@@ -201,3 +201,110 @@
      }
  }
  
+@@ -2452,8 +2509,10 @@
+                 });
+                 result = ProcResult::Value(0);
+             } else if msg == TASKBAR_CREATED.get() {
+-                let window_state = userdata.window_state_lock();
+-                unsafe { set_skip_taskbar(window, window_state.skip_taskbar) };
++                // Shell calls can synchronously reenter this window procedure.
++                // Release WindowState before calling ITaskbarList::AddTab/DeleteTab.
++                let skip_taskbar = userdata.window_state_lock().skip_taskbar;
++                unsafe { set_skip_taskbar(window, skip_taskbar) };
+                 result = ProcResult::DefWindowProc(wparam);
+             } else {
+                 result = ProcResult::DefWindowProc(wparam);
+--- a/src/platform_impl/windows/window.rs
++++ b/src/platform_impl/windows/window.rs
+@@ -1436,6 +1436,91 @@
+     }
+ }
+ 
++#[cfg(test)]
++mod taskbar_tests {
++    use super::super::definitions::{ITaskbarListVtbl, IUnknownVtbl};
++    use super::super::event_loop::TASKBAR_CREATED;
++    use super::*;
++    use crate::event_loop::EventLoop;
++    use crate::platform::windows::EventLoopBuilderExtWindows;
++    use windows_sys::core::{IUnknown, GUID, HRESULT};
++    use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, MINMAXINFO, WM_GETMINMAXINFO};
++
++    // Model the shell's synchronous reentry without depending on Explorer timing.
++    // Keep the real TaskbarCreated handler and native window callback in the path.
++    #[repr(C)]
++    struct Taskbar {
++        interface: ITaskbarList,
++        state: Arc<Mutex<WindowState>>,
++        unlocked: Cell<bool>,
++        calls: Cell<usize>,
++    }
++
++    unsafe extern "system" fn query(
++        _: *mut IUnknown,
++        _: *const GUID,
++        _: *mut *mut c_void,
++    ) -> HRESULT {
++        windows_sys::Win32::Foundation::E_NOINTERFACE
++    }
++    unsafe extern "system" fn reference(_: *mut IUnknown) -> u32 {
++        1
++    }
++    unsafe extern "system" fn init(_: *mut ITaskbarList) -> HRESULT {
++        S_OK
++    }
++    unsafe extern "system" fn update(this: *mut ITaskbarList, hwnd: HWND) -> HRESULT {
++        let taskbar = unsafe { &*(this as *const Taskbar) };
++        taskbar.calls.set(taskbar.calls.get() + 1);
++        let unlocked = taskbar.state.try_lock().is_ok();
++        taskbar.unlocked.set(taskbar.unlocked.get() && unlocked);
++        if unlocked {
++            let mut limits: MINMAXINFO = unsafe { mem::zeroed() };
++            // WM_GETMINMAXINFO reacquires WindowState. Avoid hanging the test on RED.
++            unsafe { SendMessageW(hwnd, WM_GETMINMAXINFO, 0, &mut limits as *mut _ as LPARAM) };
++        }
++        S_OK
++    }
++
++    static VTABLE: ITaskbarListVtbl = ITaskbarListVtbl {
++        parent: IUnknownVtbl { QueryInterface: query, AddRef: reference, Release: reference },
++        HrInit: init,
++        AddTab: update,
++        DeleteTab: update,
++        ActivateTab: update,
++        SetActiveAlt: update,
++    };
++
++    struct RestoreTaskbar(*mut ITaskbarList);
++    impl Drop for RestoreTaskbar {
++        fn drop(&mut self) {
++            TASKBAR_LIST.with(|slot| slot.set(self.0));
++        }
++    }
++
++    #[test]
++    fn taskbar_created_allows_synchronous_window_reentry() {
++        let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
++        #[allow(deprecated)]
++        let window =
++            event_loop.create_window(WindowAttributes::default().with_visible(false)).unwrap();
++        let taskbar = Taskbar {
++            interface: ITaskbarList { lpVtbl: &VTABLE },
++            state: window.window.window_state.clone(),
++            unlocked: Cell::new(true),
++            calls: Cell::new(0),
++        };
++        let pointer = &taskbar.interface as *const _ as *mut ITaskbarList;
++        let _restore = RestoreTaskbar(TASKBAR_LIST.with(|slot| slot.replace(pointer)));
++        for skip in [false, true] {
++            taskbar.state.lock().unwrap().skip_taskbar = skip;
++            unsafe { SendMessageW(window.window.window, TASKBAR_CREATED.get(), 0, 0) };
++        }
++        assert_eq!(taskbar.calls.get(), 2, "both AddTab and DeleteTab must execute");
++        assert!(taskbar.unlocked.get(), "TaskbarCreated held WindowState across shell reentry");
++    }
++}
++
+ thread_local! {
+     static COM_INITIALIZED: ComInitialized = {
+         unsafe {
