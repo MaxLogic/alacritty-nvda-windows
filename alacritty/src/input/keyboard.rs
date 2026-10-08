@@ -293,6 +293,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 /// The key sequences for `APP_KEYPAD` and alike are handled inside the bindings.
 #[inline(never)]
 fn build_sequence(key: KeyEvent, mods: ModifiersState, mode: TermMode) -> Vec<u8> {
+    let text_missing = key.text_with_all_modifiers().is_none_or(str::is_empty);
+    if let Some(control) =
+        windows_control_j_fallback(&key.logical_key, key.state, mods, mode, text_missing)
+    {
+        return vec![control];
+    }
+
     let mut modifiers = mods.into();
 
     let kitty_seq = mode.intersects(
@@ -715,4 +722,114 @@ fn is_control_character(text: &str) -> bool {
     // does not match the reported text (`^H`), despite not technically being part of C0 or C1.
     let codepoint = text.bytes().next().unwrap();
     text.len() == 1 && (codepoint < 0x20 || (0x7f..=0x9f).contains(&codepoint))
+}
+
+fn windows_control_j_fallback(
+    key: &Key,
+    state: ElementState,
+    mods: ModifiersState,
+    mode: TermMode,
+    text_missing: bool,
+) -> Option<u8> {
+    if !cfg!(windows)
+        || !text_missing
+        || state == ElementState::Released
+        || mods != ModifiersState::CONTROL
+        || mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL)
+        || !matches!(key, Key::Character(character) if character == "j")
+    {
+        return None;
+    }
+
+    Some(b'\n')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_j_windows_missing_text_fallback() {
+        let expected = cfg!(windows).then_some(b'\n');
+        assert_eq!(
+            windows_control_j_fallback(
+                &Key::Character("j".into()),
+                ElementState::Pressed,
+                ModifiersState::CONTROL,
+                TermMode::empty(),
+                true,
+            ),
+            expected
+        );
+        assert_eq!(
+            windows_control_j_fallback(
+                &Key::Character("j".into()),
+                ElementState::Pressed,
+                ModifiersState::CONTROL,
+                TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES,
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            windows_control_j_fallback(
+                &Key::Character("\n".into()),
+                ElementState::Pressed,
+                ModifiersState::CONTROL,
+                TermMode::empty(),
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            windows_control_j_fallback(
+                &Key::Character("j".into()),
+                ElementState::Pressed,
+                ModifiersState::CONTROL,
+                TermMode::REPORT_ALL_KEYS_AS_ESC,
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            windows_control_j_fallback(
+                &Key::Character("j".into()),
+                ElementState::Pressed,
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+                TermMode::empty(),
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            windows_control_j_fallback(
+                &Key::Character("c".into()),
+                ElementState::Pressed,
+                ModifiersState::CONTROL,
+                TermMode::empty(),
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            windows_control_j_fallback(
+                &Key::Character("j".into()),
+                ElementState::Released,
+                ModifiersState::CONTROL,
+                TermMode::empty(),
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            windows_control_j_fallback(
+                &Key::Character("j".into()),
+                ElementState::Pressed,
+                ModifiersState::CONTROL,
+                TermMode::empty(),
+                false,
+            ),
+            None
+        );
+    }
 }
