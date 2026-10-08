@@ -10,6 +10,10 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ## 0.18.0-dev
 
+### Added
+
+- Bounded Windows title-delivery diagnostics for investigating stale background window titles
+
 ### Packaging
 
 - Fixed `alacritty-escapes(7)` manpage missing from macOS install
@@ -17,6 +21,9 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 
 ### Fixed
 
+- Windows deadlock when taskbar recreation reenters the window callback
+- Windows event delivery and shutdown stalling after the native message queue fills
+- Visual updates stalling on Windows while the event queue remains busy
 - Spurious "Failed to set new owner of XCB selection" warnings on X11
 - Lacking permissions to launch software sending Apple events
 - Off-by-one in vi mode ParagraphUp action

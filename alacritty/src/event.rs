@@ -300,6 +300,16 @@ impl ApplicationHandler<Event> for Processor {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        #[cfg(windows)]
+        {
+            alacritty_terminal::title_diagnostics::event_loop_tick();
+            if let WindowEvent::Focused(focused) = &event {
+                alacritty_terminal::title_diagnostics::record(
+                    "focus_received",
+                    format_args!("window={window_id:?} focused={focused}"),
+                );
+            }
+        }
         if self.config.debug.print_events {
             info!(target: LOG_TARGET_WINIT, "{event:?}");
         }
@@ -331,6 +341,18 @@ impl ApplicationHandler<Event> for Processor {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
+        #[cfg(windows)]
+        {
+            alacritty_terminal::title_diagnostics::event_loop_tick();
+            if let EventType::Terminal(TerminalEvent::Title(_) | TerminalEvent::ResetTitle) =
+                &event.payload
+            {
+                alacritty_terminal::title_diagnostics::record(
+                    "title_received",
+                    format_args!("{event:?}"),
+                );
+            }
+        }
         if self.config.debug.print_events {
             info!(target: LOG_TARGET_WINIT, "{event:?}");
         }
@@ -459,6 +481,9 @@ impl ApplicationHandler<Event> for Processor {
                     #[cfg(windows)]
                     window_context.update_accessibility_snapshot();
                     window_context.dirty = true;
+                    #[cfg(windows)]
+                    window_context.draw_pending_frame(&mut self.scheduler);
+                    #[cfg(not(windows))]
                     if window_context.display.window.has_frame {
                         window_context.display.window.request_redraw();
                     }
@@ -493,6 +518,9 @@ impl ApplicationHandler<Event> for Processor {
             (EventType::Frame, Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     window_context.display.window.has_frame = true;
+                    #[cfg(windows)]
+                    window_context.draw_pending_frame(&mut self.scheduler);
+                    #[cfg(not(windows))]
                     if window_context.dirty {
                         window_context.display.window.request_redraw();
                     }
@@ -514,6 +542,8 @@ impl ApplicationHandler<Event> for Processor {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(windows)]
+        alacritty_terminal::title_diagnostics::event_loop_tick();
         if self.config.debug.print_events {
             info!(target: LOG_TARGET_WINIT, "About to wait");
         }
@@ -528,6 +558,8 @@ impl ApplicationHandler<Event> for Processor {
                 &mut self.scheduler,
                 WinitEvent::AboutToWait,
             );
+            #[cfg(windows)]
+            window_context.draw_pending_frame(&mut self.scheduler);
         }
 
         #[cfg(windows)]
@@ -1925,11 +1957,32 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 },
                 EventType::Terminal(event) => match event {
                     TerminalEvent::Title(title) => {
+                        #[cfg(windows)]
+                        alacritty_terminal::title_diagnostics::record(
+                            "title_apply",
+                            format_args!(
+                                "window={:?} focused={} preserve={} dynamic={} title={title:?}",
+                                self.ctx.display.window.id(),
+                                self.ctx.terminal.is_focused,
+                                self.ctx.preserve_title,
+                                self.ctx.config.window.dynamic_title,
+                            ),
+                        );
                         if !self.ctx.preserve_title && self.ctx.config.window.dynamic_title {
                             self.ctx.window().set_title(title);
                         }
                     },
                     TerminalEvent::ResetTitle => {
+                        #[cfg(windows)]
+                        alacritty_terminal::title_diagnostics::record(
+                            "title_reset_apply",
+                            format_args!(
+                                "window={:?} preserve={} dynamic={}",
+                                self.ctx.display.window.id(),
+                                self.ctx.preserve_title,
+                                self.ctx.config.window.dynamic_title,
+                            ),
+                        );
                         let window_config = &self.ctx.config.window;
                         if !self.ctx.preserve_title && window_config.dynamic_title {
                             self.ctx.display.window.set_title(window_config.identity.title.clone());
@@ -2150,7 +2203,24 @@ impl EventProxy {
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: TerminalEvent) {
-        let _ = self.proxy.send_event(Event::new(event.into(), self.window_id));
+        #[cfg(windows)]
+        let title_event = matches!(&event, TerminalEvent::Title(_) | TerminalEvent::ResetTitle);
+        #[cfg(windows)]
+        if title_event {
+            alacritty_terminal::title_diagnostics::record(
+                "title_send",
+                format_args!("window={:?} event={event:?}", self.window_id,),
+            );
+        }
+        let result = self.proxy.send_event(Event::new(event.into(), self.window_id));
+        #[cfg(windows)]
+        if title_event {
+            alacritty_terminal::title_diagnostics::record(
+                "title_send_result",
+                format_args!("window={:?} success={}", self.window_id, result.is_ok(),),
+            );
+        }
+        let _ = result;
     }
 }
 

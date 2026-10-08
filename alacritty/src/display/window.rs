@@ -266,12 +266,42 @@ impl Window {
     /// Set the window title.
     #[inline]
     pub fn set_title(&mut self, title: String) {
+        #[cfg(windows)]
+        alacritty_terminal::title_diagnostics::record(
+            "title_window_begin",
+            format_args!("window={:?} title={title:?}", self.id(),),
+        );
         self.title = title;
         #[cfg(windows)]
         if let Some(accessibility) = &self._accessibility {
             accessibility.set_name(&self.title);
         }
         self.window.set_title(&self.title);
+        #[cfg(windows)]
+        {
+            alacritty_terminal::title_diagnostics::record(
+                "title_native_return",
+                format_args!("window={:?}", self.id()),
+            );
+            use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowTextW;
+
+            if let RawWindowHandle::Win32(handle) = self.raw_window_handle() {
+                let mut text = [0u16; 1024];
+                // SAFETY: This is our live window and text is a writable UTF-16 buffer.
+                let len = unsafe {
+                    GetWindowTextW(handle.hwnd.get() as _, text.as_mut_ptr(), text.len() as i32)
+                };
+                let native = String::from_utf16_lossy(&text[..len.max(0) as usize]);
+                alacritty_terminal::title_diagnostics::record(
+                    "title_native_end",
+                    format_args!(
+                        "window={:?} readback_matches={} native={native:?}",
+                        self.id(),
+                        native == self.title,
+                    ),
+                );
+            }
+        }
     }
 
     #[cfg(windows)]

@@ -828,6 +828,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     pub fn on_focus_change(&mut self, is_focused: bool) {
+        #[cfg(windows)]
+        alacritty_terminal::title_diagnostics::record(
+            "focus_apply",
+            format_args!(
+                "window={:?} focused={is_focused} report_to_child={}",
+                self.ctx.window().id(),
+                self.ctx.terminal().mode().contains(TermMode::FOCUS_IN_OUT),
+            ),
+        );
         if self.ctx.terminal().mode().contains(TermMode::FOCUS_IN_OUT) {
             let chr = if is_focused { "I" } else { "O" };
 

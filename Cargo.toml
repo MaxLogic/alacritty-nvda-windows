@@ -6,6 +6,7 @@ members = [
     "alacritty_config_derive",
 ]
 resolver = "2"
+exclude = ["vendor/winit"]
 
 [workspace.package]
 edition = "2024"
@@ -22,4 +23,5 @@ toml_edit = "0.24.0"
 
 # TODO: Validation of fix for #6978. Remove before next release and use released `x11-clipboard`.
 [patch.crates-io]
+winit = { path = "vendor/winit" }
 x11-clipboard = { git = "https://github.com/quininer/x11-clipboard.git", rev = "19ab2163cf0bd0db607e827a5214571990307866" }

@@ -1,0 +1,10 @@
+{
+  "winit": "0.30.13",
+  "source_branch": "fix/windows-event-delivery",
+  "source_base": "abdec263672bfdd010f00e1ea268efde375b4db0",
+  "combined_test_base": "737b44bcb64ca6d04187b8b88f7f16fd30a65ae1",
+  "original_file_sha256": "f99c748e189ea8ce4bde08ec186ee27306756ce93d5235371e198c07e582c52d",
+  "candidate_file_sha256": "d9944e50ce0494744269340e9666f18dd24c86cfd05851b949096a377111d38a",
+  "patch_sha256": "1ee09126105712ad3f5521393cbf73688eeee6252cc9c64f278e0a340802e57c",
+  "scope": "Pending-event delivery and TaskbarCreated lock-lifetime fix with native regression; vendored production dependency."
+}
