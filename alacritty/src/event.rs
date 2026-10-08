@@ -80,6 +80,50 @@ const TOUCH_ZOOM_FACTOR: f32 = 0.01;
 /// Cooldown between invocations of the bell command.
 const BELL_CMD_COOLDOWN: Duration = Duration::from_millis(100);
 
+#[cfg(windows)]
+fn next_event_loop_deadline(
+    scheduler_deadline: Option<Instant>,
+    accessibility_deadline: Option<Instant>,
+) -> Option<Instant> {
+    match (scheduler_deadline, accessibility_deadline) {
+        (Some(scheduler), Some(accessibility)) => Some(min(scheduler, accessibility)),
+        (scheduler, accessibility) => scheduler.or(accessibility),
+    }
+}
+
+#[cfg(windows)]
+trait AccessibilityEventSource {
+    fn flush_due_events(&self, now: Instant);
+    fn event_deadline(&self) -> Option<Instant>;
+}
+
+#[cfg(windows)]
+impl AccessibilityEventSource for Window {
+    fn flush_due_events(&self, now: Instant) {
+        self.flush_due_accessibility_events(now);
+    }
+
+    fn event_deadline(&self) -> Option<Instant> {
+        self.accessibility_event_deadline()
+    }
+}
+
+#[cfg(windows)]
+fn flush_due_accessibility_events<'a, T>(
+    sources: impl IntoIterator<Item = &'a T>,
+    now: Instant,
+) -> Option<Instant>
+where
+    T: AccessibilityEventSource + 'a,
+{
+    let mut deadline = None;
+    for source in sources {
+        source.flush_due_events(now);
+        deadline = next_event_loop_deadline(deadline, source.event_deadline());
+    }
+    deadline
+}
+
 /// The event processor.
 ///
 /// Stores some state from received events and dispatches actions when they are
@@ -207,6 +251,10 @@ impl Processor {
 
     /// Check if an event is irrelevant and can be skipped.
     fn skip_window_event(event: &WindowEvent) -> bool {
+        if cfg!(windows) && matches!(event, WindowEvent::Moved(_)) {
+            return false;
+        }
+
         matches!(
             event,
             WindowEvent::KeyboardInput { is_synthetic: true, .. }
@@ -408,6 +456,8 @@ impl ApplicationHandler<Event> for Processor {
             },
             (EventType::Terminal(TerminalEvent::Wakeup), Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
+                    #[cfg(windows)]
+                    window_context.update_accessibility_snapshot();
                     window_context.dirty = true;
                     if window_context.display.window.has_frame {
                         window_context.display.window.request_redraw();
@@ -480,9 +530,18 @@ impl ApplicationHandler<Event> for Processor {
             );
         }
 
+        #[cfg(windows)]
+        let accessibility_deadline = flush_due_accessibility_events(
+            self.windows.values().map(|window_context| &window_context.display.window),
+            Instant::now(),
+        );
+
         // Update the scheduler after event processing to ensure
         // the event loop deadline is as accurate as possible.
-        let control_flow = match self.scheduler.update() {
+        let deadline = self.scheduler.update();
+        #[cfg(windows)]
+        let deadline = next_event_loop_deadline(deadline, accessibility_deadline);
+        let control_flow = match deadline {
             Some(instant) => ControlFlow::WaitUntil(instant),
             None => ControlFlow::Wait,
         };
@@ -1985,6 +2044,9 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     WindowEvent::Focused(is_focused) => {
                         self.ctx.terminal.is_focused = is_focused;
 
+                        #[cfg(windows)]
+                        self.ctx.window().set_accessibility_focused(is_focused);
+
                         // When the unfocused hollow is used we must redraw on focus change.
                         if self.ctx.config.cursor.unfocused_hollow {
                             *self.ctx.dirty = true;
@@ -2089,5 +2151,55 @@ impl EventProxy {
 impl EventListener for EventProxy {
     fn send_event(&self, event: TerminalEvent) {
         let _ = self.proxy.send_event(Event::new(event.into(), self.window_id));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    use winit::dpi::PhysicalPosition;
+    use winit::event::WindowEvent;
+
+    use super::AccessibilityEventSource;
+
+    struct TestAccessibilityEventSource {
+        flushed: Cell<bool>,
+        deadline: Instant,
+    }
+
+    impl AccessibilityEventSource for TestAccessibilityEventSource {
+        fn flush_due_events(&self, _now: Instant) {
+            self.flushed.set(true);
+        }
+
+        fn event_deadline(&self) -> Option<Instant> {
+            assert!(self.flushed.get(), "deadline queried before direct flush");
+            Some(self.deadline)
+        }
+    }
+
+    #[test]
+    fn trailing_uia_flush_survives_stranded_proxy_wake() {
+        let now = Instant::now();
+        let accessibility_deadline = Instant::now() + Duration::from_millis(75);
+        let source = TestAccessibilityEventSource {
+            flushed: Cell::new(false),
+            deadline: accessibility_deadline,
+        };
+
+        assert_eq!(
+            super::flush_due_accessibility_events([&source], now),
+            Some(accessibility_deadline)
+        );
+        assert!(source.flushed.get());
+    }
+
+    #[test]
+    fn accessibility_invalidation_matrix() {
+        assert!(!super::Processor::skip_window_event(&WindowEvent::Moved(PhysicalPosition::new(
+            10, 20
+        ),)));
     }
 }

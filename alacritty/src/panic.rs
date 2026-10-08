@@ -12,6 +12,11 @@ use alacritty_terminal::tty::windows::win32_string;
 pub fn attach_handler() {
     panic::set_hook(Box::new(|panic_info| {
         let _ = writeln!(io::stderr(), "{}", panic_info);
+
+        if crate::accessibility::ffi::is_boundary_active() {
+            return;
+        }
+
         let msg = format!("{}\n\nPress Ctrl-C to Copy", panic_info);
         unsafe {
             MessageBoxW(

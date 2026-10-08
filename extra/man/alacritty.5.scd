@@ -486,6 +486,24 @@ Colors are specified using their hexadecimal values with a _#_ prefix: _#RRGGBB_
 
 	Default: _false_
 
+*ignore_reverse_video* = _true_ | _false_
+
+	Do not swap foreground and background colors for ANSI reverse-video cells.
+	This can be useful for accessibility themes where applications use reverse
+	video to highlight focused rows, but the terminal should remain
+	black-on-white.
+
+	Default: _false_
+
+*force_primary_colors* = _true_ | _false_
+
+	Force all terminal grid cells to use _primary.foreground_ and
+	_primary.background_ after resolving application colors. This is intended
+	for monochrome accessibility themes where application highlights and
+	explicit ANSI backgrounds must not change contrast polarity.
+
+	Default: _false_
+
 *draw_bold_text_with_bright_colors* = _true_ | _false_
 
 	When _true_, bold text is drawn using the bright color variants.

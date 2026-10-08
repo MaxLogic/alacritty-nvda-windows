@@ -44,6 +44,11 @@ use crate::message_bar::MessageBuffer;
 use crate::scheduler::Scheduler;
 use crate::{input, renderer};
 
+#[cfg(windows)]
+fn should_update_accessibility_snapshot(dirty: bool, geometry_changed: bool) -> bool {
+    dirty || geometry_changed
+}
+
 /// Event context for one individual Alacritty window.
 pub struct WindowContext {
     pub message_buffer: MessageBuffer,
@@ -232,7 +237,7 @@ impl WindowContext {
         }
 
         // Create context for the Alacritty window.
-        Ok(WindowContext {
+        let window_context = WindowContext {
             preserve_title,
             terminal,
             display,
@@ -254,7 +259,10 @@ impl WindowContext {
             mouse: Default::default(),
             touch: Default::default(),
             dirty: Default::default(),
-        })
+        };
+        #[cfg(windows)]
+        window_context.update_accessibility_snapshot();
+        Ok(window_context)
     }
 
     /// Update the terminal window to the latest config.
@@ -422,6 +430,11 @@ impl WindowContext {
             },
         }
 
+        #[cfg(windows)]
+        let accessibility_geometry_changed = self.event_queue.iter().any(|event| {
+            matches!(event, WinitEvent::WindowEvent { event: WindowEvent::Moved(_), .. })
+        });
+
         let mut terminal = self.terminal.lock();
 
         let old_is_searching = self.search_state.history_index.is_some();
@@ -482,6 +495,11 @@ impl WindowContext {
             self.mouse.hint_highlight_dirty = false;
         }
 
+        #[cfg(windows)]
+        if should_update_accessibility_snapshot(self.dirty, accessibility_geometry_changed) {
+            self.display.window.update_accessibility_snapshot(&terminal, &self.display.size_info);
+        }
+
         // Don't call `request_redraw` when event is `RedrawRequested` since the `dirty` flag
         // represents the current frame, but redraw is for the next frame.
         if self.dirty
@@ -496,6 +514,12 @@ impl WindowContext {
     /// ID of this terminal context.
     pub fn id(&self) -> WindowId {
         self.display.window.id()
+    }
+
+    #[cfg(windows)]
+    pub fn update_accessibility_snapshot(&self) {
+        let terminal = self.terminal.lock();
+        self.display.window.update_accessibility_snapshot(&terminal, &self.display.size_info);
     }
 
     /// Write the ref test results to the disk.
@@ -557,6 +581,16 @@ impl WindowContext {
                 terminal.scroll_display(Scroll::Delta(-1));
             }
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn accessibility_invalidation_matrix() {
+        assert!(super::should_update_accessibility_snapshot(true, false));
+        assert!(super::should_update_accessibility_snapshot(false, true));
+        assert!(!super::should_update_accessibility_snapshot(false, false));
     }
 }
 

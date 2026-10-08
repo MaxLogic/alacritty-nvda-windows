@@ -211,12 +211,13 @@ impl RenderableCell {
         let mut fg = Self::compute_fg_rgb(content, cell.fg, cell.flags);
         let mut bg = Self::compute_bg_rgb(content, cell.bg);
 
-        let mut bg_alpha = if cell.flags.contains(Flags::INVERSE) {
-            mem::swap(&mut fg, &mut bg);
-            1.0
-        } else {
-            Self::compute_bg_alpha(content.config, cell.bg)
-        };
+        let mut bg_alpha =
+            if cell.flags.contains(Flags::INVERSE) && !content.config.colors.ignore_reverse_video {
+                mem::swap(&mut fg, &mut bg);
+                1.0
+            } else {
+                Self::compute_bg_alpha(content.config, cell.bg)
+            };
 
         let is_selected = content.terminal_content.selection.is_some_and(|selection| {
             selection.contains_cell(
@@ -281,9 +282,16 @@ impl RenderableCell {
         let cell_point = cell.point;
         let point = term::point_to_viewport(display_offset, cell_point).unwrap();
 
-        let underline = cell
+        let mut underline = cell
             .underline_color()
             .map_or(fg, |underline| Self::compute_fg_rgb(content, underline, flags));
+
+        if content.config.colors.force_primary_colors {
+            fg = content.config.colors.primary.foreground;
+            bg = content.config.colors.primary.background;
+            underline = fg;
+            bg_alpha = if bg_alpha > 0. { 1. } else { 0. };
+        }
 
         let zerowidth = cell.zerowidth();
         let hyperlink = cell.hyperlink();

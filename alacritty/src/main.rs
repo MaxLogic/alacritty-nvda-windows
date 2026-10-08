@@ -27,6 +27,7 @@ use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 
 use alacritty_terminal::tty;
 
+pub mod accessibility;
 mod cli;
 mod clipboard;
 mod config;
